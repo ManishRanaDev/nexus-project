@@ -4,7 +4,10 @@ import React, { useState, useEffect, ChangeEvent } from 'react';
 import io from 'socket.io-client';
 import { QRCodeCanvas } from 'qrcode.react';
 
-const socket = io('http://65.21.251.46');
+const socket = io('https://65.21.251.46', {
+  transports: ['websocket'],
+  secure: true
+});
 const CONTACT_ID = '918299515901@c.us';
 const STORAGE_KEY = 'nexus-chat-918299515901';
 const LABEL = 'Stealth_Command';

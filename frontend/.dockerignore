@@ -1,5 +1,0 @@
-node_modules
-.local-chromium
-npm-debug.log
-Dockerfile
-fly.toml

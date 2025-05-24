@@ -4,7 +4,7 @@ import React, { useState, useEffect, ChangeEvent } from 'react';
 import io from 'socket.io-client';
 import { QRCodeCanvas } from 'qrcode.react';
 
-const socket = io('https://65.21.251.46', {
+const socket = io('https://nexubacksend.shop', {
   transports: ['websocket'],
   secure: true
 });

@@ -86,6 +86,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+  if (mode === 'LOCKED') {
+    setPin('');
+  }
+}, [mode]);
+
+  useEffect(() => {
     if (mode === 'FAKE') {
       const pool = [
         '[INFO] Secure handshake established with node-001',

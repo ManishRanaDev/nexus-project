@@ -8,7 +8,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-const TARGET_CONTACT = '918299515901@c.us';
+const TARGET_CONTACT = '919958106591@c.us';
 const MEDIA_DIR = path.join(__dirname, 'public');
 const BASE_URL = process.env.PUBLIC_URL || 'http://localhost:3001';
 

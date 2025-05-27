@@ -27,6 +27,10 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/media', express.static(MEDIA_DIR));
+app.get('/health', (req, res) => {
+  const status = client.info?.wid ? 'connected' : 'disconnected';
+  res.status(200).json({ status });
+});
 app.get('/sync-messages', async (req, res) => {
   try {
     const chats = await client.getChats();
@@ -86,6 +90,12 @@ client.on('qr', (qr) => {
   console.log('QR RECEIVED');
   qrcode.generate(qr, { small: true });
   io.emit('qr', qr);
+});
+
+client.on('disconnected', (reason) => {
+  console.error('❌ WhatsApp disconnected:', reason);
+  io.emit('disconnected', reason);
+  client.initialize(); // Reconnect
 });
 
 client.on('ready', async () => {
@@ -190,6 +200,10 @@ io.on('connection', (socket) => {
 client.initialize();
 
 app.get('/', (req, res) => res.send('Nexus Backend Running'));
+
+client.on('authenticated', () => console.log('✅ Authenticated'));
+client.on('auth_failure', () => console.log('❌ Auth failed'));
+client.on('change_state', state => console.log('📶 State changed:', state));
 
 server.listen(3001, () => console.log('🚀 Backend running on http://localhost:3001'));
 

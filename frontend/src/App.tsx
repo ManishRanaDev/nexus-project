@@ -240,7 +240,7 @@ function App() {
       {ready && (
         <>
           <div style={{ maxHeight: '50vh', overflowY: 'auto', border: '1px solid gray', padding: '10px', marginTop: '20px', background: '#111' }}>
-            {messages.map((msg, i) => (
+            {messages.slice(-20).map((msg, i) => (
               <div key={i} style={{ margin: '6px 0' }}>
                 <b>{msg.from === CONTACT_ID ? LABEL : 'Stealth_Reporter'}:</b> {msg.body && <span>{msg.body}</span>}
                 {msg.mediaUrl && msg.mimetype?.startsWith('image/') && (

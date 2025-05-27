@@ -37,6 +37,10 @@ function App() {
   useEffect(() => {
     socket.on('qr', setQr);
     socket.on('ready', () => setReady(true));
+    socket.on('disconnected', (reason) => {
+  setReady(false);
+  alert('WhatsApp disconnected: ' + reason);
+});
     socket.on('message', (msg) => {
       if (msg.from === CONTACT_ID || msg.to === CONTACT_ID) {
         setMessages((prev) => {

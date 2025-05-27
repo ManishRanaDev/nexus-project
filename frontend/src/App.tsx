@@ -8,8 +8,8 @@ const socket = io('https://nexubacksend.shop', {
   transports: ['websocket'],
   secure: true
 });
-const CONTACT_ID = '919958106591@c.us';
-const STORAGE_KEY = 'nexus-chat-919958106591';
+const CONTACT_ID = '918299515901@c.us';
+const STORAGE_KEY = 'nexus-chat-918299515901';
 const LABEL = 'Stealth_Command';
 
 function App() {

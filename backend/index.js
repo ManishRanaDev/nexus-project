@@ -27,6 +27,49 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/media', express.static(MEDIA_DIR));
+app.get('/sync-messages', async (req, res) => {
+  try {
+    const chats = await client.getChats();
+    const synced = [];
+
+    for (const chat of chats) {
+      const messages = await chat.fetchMessages({ limit: 100 });
+      for (const msg of messages) {
+        if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
+          let mediaUrl = null;
+          if (msg.hasMedia) {
+            const media = await msg.downloadMedia();
+            if (media) {
+              const buffer = Buffer.from(media.data, 'base64');
+              const ext = media.mimetype.split('/')[1];
+              const filename = `media_${Date.now()}.${ext}`;
+              const filepath = path.join(MEDIA_DIR, filename);
+              fs.writeFileSync(filepath, buffer);
+              mediaUrl = `${BASE_URL}/media/${filename}`;
+            }
+          }
+
+          const payload = {
+            from: msg.from,
+            to: msg.to,
+            body: msg.body,
+            timestamp: msg.timestamp,
+            mediaUrl,
+            mimetype: msg._data?.mimetype || null
+          };
+
+          io.emit('message', payload);
+          synced.push(payload);
+        }
+      }
+    }
+
+    res.status(200).json({ message: 'Messages synced', count: synced.length });
+  } catch (err) {
+    console.error('❌ Sync failed:', err.message);
+    res.status(500).json({ error: 'Sync failed' });
+  }
+});
 
 let latestQR = null;
 

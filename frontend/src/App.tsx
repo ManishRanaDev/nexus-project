@@ -127,6 +127,16 @@ function App() {
     else setMode('LOCKED');
   };
 
+  const handleManualSync = async () => {
+  try {
+    const res = await fetch('https://nexubacksend.shop/sync-messages');
+    const data = await res.json();
+    alert(`Synced ${data.count} messages.`);
+  } catch (err) {
+    alert('Failed to sync.');
+  }
+};
+
   const handleSendText = () => {
     const outgoing = {
       from: 'you',
@@ -254,6 +264,10 @@ function App() {
         style={{ position: 'absolute', top: '10px', right: '10px', padding: '6px 12px', background: '#222', color: '#fff', border: 'none', cursor: 'pointer' }}>
         Lock
       </button>
+      <br/>
+      <button onClick={handleManualSync} style={{ marginTop: '10px', padding: '6px 12px' }}>
+  🔄 Manual Sync
+</button>
     </div>
   );
 }

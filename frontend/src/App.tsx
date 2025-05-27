@@ -30,6 +30,11 @@ function App() {
   }, [mode]);
 
   useEffect(() => {
+  const interval = setInterval(handleManualSync, 1000 * 60 * 5); // every 5 minutes
+  return () => clearInterval(interval);
+}, []);
+
+  useEffect(() => {
     socket.on('qr', setQr);
     socket.on('ready', () => setReady(true));
     socket.on('message', (msg) => {

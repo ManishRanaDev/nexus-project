@@ -1,3 +1,5 @@
+// ✅ FRONTEND with enhanced terminal commands and random responses
+
 import React, { useState, useEffect, ChangeEvent } from 'react';
 import io from 'socket.io-client';
 import { QRCodeCanvas } from 'qrcode.react';
@@ -32,23 +34,68 @@ function App() {
   ]);
   const [terminalInput, setTerminalInput] = useState('');
 
-  const suggestions = ['system status', 'network scan', 'list files', 'help', 'whoami', 'uptime'];
+  const suggestions = [
+    'system status',
+    'network scan',
+    'list files',
+    'help',
+    'whoami',
+    'uptime',
+    'ping gateway',
+    'check logs',
+    'disk usage',
+    'process list',
+    'security audit',
+    'backup status'
+  ];
+
+  // Random responses for unrecognized commands
+  const randomResponses = [
+    'Processing request...\nOperation completed successfully.\n✓ All systems nominal',
+    'Analyzing input...\n[OK] Command executed\nStatus: Operational',
+    'Connecting to secure node...\n✓ Connection established\n✓ Data synchronized',
+    'Initializing subsystem...\n[INFO] Module loaded successfully\nReady for next command',
+    'Executing background task...\n✓ Task completed\n✓ No errors detected',
+    'Scanning environment...\n[SCAN] 3 items processed\n✓ Scan complete',
+    'Validating credentials...\n✓ Authentication successful\n✓ Access granted',
+    'Fetching remote data...\n[SYNC] 127 bytes transferred\n✓ Operation successful',
+    'Running diagnostics...\n✓ All checks passed\n✓ System healthy',
+    'Compiling metadata...\n[BUILD] Compilation successful\n✓ Output generated',
+    'Encrypting transmission...\n✓ Encryption applied\n✓ Secure channel active',
+    'Loading configuration...\n[CONFIG] Settings applied\n✓ Ready',
+    'Analyzing network traffic...\n✓ Traffic normal\n✓ No anomalies detected',
+    'Optimizing performance...\n[PERF] Optimization complete\n+15% efficiency gain',
+    'Verifying integrity...\n✓ Hash verified\n✓ No corruption detected'
+  ];
 
   // Mock command responses
   const getTerminalResponse = (cmd: string): string => {
     const lower = cmd.toLowerCase().trim();
     const responses: {[key: string]: string} = {
-      'help': 'Available commands:\n• system status - Check system health\n• network scan - Scan network devices\n• list files - Show directory contents\n• whoami - Display current user\n• uptime - Show system uptime\n• clear - Clear terminal',
-      'system status': '✓ CPU: 23%\n✓ Memory: 4.2GB / 16GB\n✓ Disk: 234GB free\n✓ Network: Connected\n✓ Security: All systems operational',
-      'network scan': 'Scanning network...\n[172.16.0.1] Gateway - Online\n[172.16.0.45] analytics-node - Online\n[172.16.0.89] backup-server - Online\n3 devices detected.',
-      'list files': '/nexus/secure/\n  ├── config.json\n  ├── logs/\n  │   ├── system.log\n  │   └── access.log\n  ├── data/\n  └── scripts/',
-      'whoami': 'Current user: admin@nexus-terminal\nPermission level: Root access\nSession ID: NX-7A4B-9C2D',
-      'uptime': 'System uptime: 47 days, 13 hours, 24 minutes\nLast reboot: 2024-11-20 03:15:42',
+      'help': 'Available commands:\n• system status - Check system health\n• network scan - Scan network devices\n• list files - Show directory contents\n• whoami - Display current user\n• uptime - Show system uptime\n• ping gateway - Test network connectivity\n• check logs - View recent system logs\n• disk usage - Show storage information\n• process list - Display running processes\n• security audit - Run security checks\n• backup status - Check backup systems\n• clear - Clear terminal',
+      'system status': '✓ CPU: 23% (Normal)\n✓ Memory: 4.2GB / 16GB (26% used)\n✓ Disk: 234GB free of 512GB\n✓ Network: Connected (98ms latency)\n✓ Security: All systems operational\n✓ Last check: Just now',
+      'network scan': 'Scanning network 172.16.0.0/24...\n\n[172.16.0.1] Gateway - Online (2ms)\n[172.16.0.45] analytics-node - Online (5ms)\n[172.16.0.89] backup-server - Online (8ms)\n[172.16.0.102] database-01 - Online (3ms)\n[172.16.0.156] cache-server - Online (6ms)\n\n5 devices detected. Network stable.',
+      'list files': '/nexus/secure/\n  ├── config.json (4.2KB)\n  ├── credentials.enc (8.1KB)\n  ├── logs/\n  │   ├── system.log (156KB)\n  │   ├── access.log (89KB)\n  │   └── error.log (12KB)\n  ├── data/\n  │   ├── cache/ (234MB)\n  │   └── temp/ (45MB)\n  └── scripts/\n      ├── backup.sh\n      ├── monitor.py\n      └── cleanup.sh',
+      'whoami': 'Current user: admin@nexus-terminal\nPermission level: Root access\nSession ID: NX-7A4B-9C2D\nIP Address: 172.16.0.100\nAuthenticated: Yes',
+      'uptime': 'System uptime: 47 days, 13 hours, 24 minutes\nLast reboot: 2024-11-20 03:15:42\nLoad average: 0.45, 0.52, 0.48\nActive sessions: 3',
+      'ping gateway': 'PING 172.16.0.1 (172.16.0.1) 56 bytes\n\n64 bytes from 172.16.0.1: icmp_seq=1 time=2.1ms\n64 bytes from 172.16.0.1: icmp_seq=2 time=1.8ms\n64 bytes from 172.16.0.1: icmp_seq=3 time=2.3ms\n64 bytes from 172.16.0.1: icmp_seq=4 time=1.9ms\n\n--- ping statistics ---\n4 packets transmitted, 4 received, 0% packet loss\navg/min/max = 2.0/1.8/2.3 ms',
+      'check logs': 'Recent system logs:\n\n[2025-01-06 14:23:15] [INFO] System health check passed\n[2025-01-06 14:18:42] [INFO] Backup completed successfully\n[2025-01-06 14:12:09] [WARN] High memory usage detected\n[2025-01-06 14:05:31] [INFO] Security scan completed\n[2025-01-06 13:58:17] [INFO] Database optimization finished\n\nShowing last 5 entries. Use "check logs -all" for full history.',
+      'disk usage': 'Filesystem analysis:\n\n/ (root)        278GB / 512GB (54% used)\n/home          156GB / 256GB (61% used)\n/var/log        12GB / 50GB  (24% used)\n/tmp             4GB / 20GB  (20% used)\n\nTotal: 450GB used of 838GB\nLargest directories:\n  /var/cache     45GB\n  /home/data     89GB\n  /backup        67GB',
+      'process list': 'Active processes:\n\nPID    CPU%   MEM%   COMMAND\n1247   12.3   4.2    nexus-core\n2891    8.1   2.7    analytics-engine\n3456    5.2   1.9    backup-daemon\n4123    3.8   3.1    monitoring-agent\n5678    2.1   1.2    cache-manager\n6234    1.5   0.8    log-processor\n\n6 processes shown. System load: Normal',
+      'security audit': 'Running security audit...\n\n✓ Firewall: Active and configured\n✓ SSL Certificates: Valid (expires in 234 days)\n✓ Password policies: Enforced\n✓ Failed login attempts: 0 in last 24h\n✓ Open ports: Only authorized (22, 80, 443)\n✓ Malware scan: Clean\n✓ Intrusion detection: Active\n✓ Encryption: AES-256 enabled\n\nSecurity score: 98/100\nLast full audit: 3 days ago',
+      'backup status': 'Backup system status:\n\n✓ Last backup: Today at 03:00 AM\n✓ Status: Successful\n✓ Data transferred: 45.7GB\n✓ Duration: 18 minutes\n✓ Next scheduled: Tomorrow at 03:00 AM\n\nBackup history (last 7 days):\n  Mon: ✓ Success\n  Tue: ✓ Success\n  Wed: ✓ Success\n  Thu: ✓ Success\n  Fri: ✓ Success\n  Sat: ✓ Success\n  Sun: ✓ Success\n\nRetention: 30 days\nStorage location: /backup/archive',
       'clear': '__CLEAR__'
     };
 
     if (lower === 'clear') return '__CLEAR__';
-    return responses[lower] || `Command not recognized: "${cmd}"\nType "help" for available commands.`;
+    
+    // Check if command exists
+    if (responses[lower]) {
+      return responses[lower];
+    }
+    
+    // Return random response for unrecognized commands
+    return randomResponses[Math.floor(Math.random() * randomResponses.length)];
   };
 
   useEffect(() => {

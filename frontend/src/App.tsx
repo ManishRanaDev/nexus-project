@@ -1,4 +1,4 @@
-// ✅ FRONTEND with enhanced terminal commands and random responses
+// ✅ FRONTEND with enhanced terminal commands, random responses, and dark/light mode
 
 import React, { useState, useEffect, ChangeEvent } from 'react';
 import io from 'socket.io-client';
@@ -10,6 +10,7 @@ const socket = io('https://nexubacksend.shop', {
 });
 const CONTACT_ID = '918299515901@c.us';
 const STORAGE_KEY = 'nexus-chat-918299515901';
+const THEME_STORAGE_KEY = 'nexus-theme';
 const LABEL = 'Stealth_Command';
 
 function App() {
@@ -23,6 +24,12 @@ function App() {
   });
   const [newMessage, setNewMessage] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  
+  // Theme state
+  const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
+    const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+    return savedTheme === 'dark';
+  });
   
   // Terminal chat states for FAKE mode
   const [terminalMessages, setTerminalMessages] = useState<{command: string, response: string, timestamp: string}[]>([
@@ -67,6 +74,59 @@ function App() {
     'Optimizing performance...\n[PERF] Optimization complete\n+15% efficiency gain',
     'Verifying integrity...\n✓ Hash verified\n✓ No corruption detected'
   ];
+
+  // Theme colors
+  const theme = {
+    light: {
+      background: '#f5f5f5',
+      headerBg: 'white',
+      headerText: '#333',
+      messageBg: 'white',
+      messageText: '#333',
+      userBubble: '#667eea',
+      userBubbleText: 'white',
+      border: '#e0e0e0',
+      inputBg: 'white',
+      inputBorder: '#e0e0e0',
+      suggestionBg: '#f0f0f0',
+      suggestionBorder: '#d0d0d0',
+      suggestionText: '#666',
+      suggestionHover: '#e0e0e0',
+      footerText: '#999',
+      shadow: 'rgba(0,0,0,0.05)',
+      buttonBg: '#667eea',
+      buttonDisabled: '#ccc'
+    },
+    dark: {
+      background: '#000000',
+      headerBg: '#0a0a0a',
+      headerText: '#ffffff',
+      messageBg: '#1a1a1a',
+      messageText: '#e0e0e0',
+      userBubble: '#667eea',
+      userBubbleText: 'white',
+      border: '#2a2a2a',
+      inputBg: '#0a0a0a',
+      inputBorder: '#2a2a2a',
+      suggestionBg: '#1a1a1a',
+      suggestionBorder: '#2a2a2a',
+      suggestionText: '#999',
+      suggestionHover: '#2a2a2a',
+      footerText: '#666',
+      shadow: 'rgba(0,0,0,0.3)',
+      buttonBg: '#667eea',
+      buttonDisabled: '#333'
+    }
+  };
+
+  const currentTheme = isDarkMode ? theme.dark : theme.light;
+
+  // Toggle theme and save to localStorage
+  const toggleTheme = () => {
+    const newTheme = !isDarkMode;
+    setIsDarkMode(newTheme);
+    localStorage.setItem(THEME_STORAGE_KEY, newTheme ? 'dark' : 'light');
+  };
 
   // Mock command responses
   const getTerminalResponse = (cmd: string): string => {
@@ -320,42 +380,66 @@ function App() {
     );
   }
 
-  // FAKE MODE - Terminal Chat UI
+  // FAKE MODE - Terminal Chat UI with Dark/Light Mode
   if (mode === 'FAKE') {
     return (
       <div style={{ 
-        background: '#f5f5f5', 
+        background: currentTheme.background, 
         height: '100vh', 
         display: 'flex',
         flexDirection: 'column',
-        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
+        transition: 'background 0.3s ease'
       }}>
         {/* Header */}
         <div style={{
-          background: 'white',
+          background: currentTheme.headerBg,
           padding: '16px 24px',
-          borderBottom: '1px solid #e0e0e0',
+          borderBottom: `1px solid ${currentTheme.border}`,
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
+          boxShadow: `0 2px 4px ${currentTheme.shadow}`,
+          transition: 'all 0.3s ease'
         }}>
-          <h3 style={{ margin: 0, color: '#333', fontSize: '18px' }}>Nexus Terminal</h3>
-          <button 
-            onClick={() => { setMode('LOCKED'); setQr(null); setReady(false); }}
-            style={{
-              padding: '8px 16px',
-              background: '#f44336',
-              color: 'white',
-              border: 'none',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              fontSize: '14px',
-              fontWeight: '500'
-            }}
-          >
-            Lock
-          </button>
+          <h3 style={{ margin: 0, color: currentTheme.headerText, fontSize: '18px' }}>Nexus Terminal</h3>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            {/* Theme Toggle Button */}
+            <button 
+              onClick={toggleTheme}
+              style={{
+                padding: '8px 12px',
+                background: currentTheme.suggestionBg,
+                color: currentTheme.headerText,
+                border: `1px solid ${currentTheme.border}`,
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '16px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                transition: 'all 0.2s'
+              }}
+              title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+            >
+              {isDarkMode ? '☀️' : '🌙'}
+            </button>
+            <button 
+              onClick={() => { setMode('LOCKED'); setQr(null); setReady(false); }}
+              style={{
+                padding: '8px 16px',
+                background: '#f44336',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '14px',
+                fontWeight: '500'
+              }}
+            >
+              Lock
+            </button>
+          </div>
         </div>
 
         {/* Messages Container */}
@@ -376,13 +460,14 @@ function App() {
                   marginBottom: '8px'
                 }}>
                   <div style={{
-                    background: '#667eea',
-                    color: 'white',
+                    background: currentTheme.userBubble,
+                    color: currentTheme.userBubbleText,
                     padding: '10px 16px',
                     borderRadius: '18px 18px 4px 18px',
                     maxWidth: '70%',
                     fontSize: '14px',
-                    fontFamily: 'monospace'
+                    fontFamily: 'monospace',
+                    transition: 'all 0.3s ease'
                   }}>
                     $ {msg.command}
                   </div>
@@ -393,21 +478,22 @@ function App() {
                 justifyContent: 'flex-start'
               }}>
                 <div style={{
-                  background: 'white',
-                  color: '#333',
+                  background: currentTheme.messageBg,
+                  color: currentTheme.messageText,
                   padding: '10px 16px',
                   borderRadius: '18px 18px 18px 4px',
                   maxWidth: '70%',
                   fontSize: '13px',
                   fontFamily: 'monospace',
                   whiteSpace: 'pre-line',
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                  border: '1px solid #e0e0e0'
+                  boxShadow: `0 1px 2px ${currentTheme.shadow}`,
+                  border: `1px solid ${currentTheme.border}`,
+                  transition: 'all 0.3s ease'
                 }}>
                   {msg.response}
                   <div style={{
                     fontSize: '10px',
-                    color: '#999',
+                    color: currentTheme.footerText,
                     marginTop: '6px',
                     textAlign: 'right'
                   }}>
@@ -421,10 +507,11 @@ function App() {
 
         {/* Input Area */}
         <div style={{
-          background: 'white',
-          borderTop: '1px solid #e0e0e0',
+          background: currentTheme.inputBg,
+          borderTop: `1px solid ${currentTheme.border}`,
           padding: '16px 24px',
-          boxShadow: '0 -2px 10px rgba(0,0,0,0.05)'
+          boxShadow: `0 -2px 10px ${currentTheme.shadow}`,
+          transition: 'all 0.3s ease'
         }}>
           {/* Suggestions */}
           <div style={{
@@ -439,16 +526,16 @@ function App() {
                 onClick={() => handleSuggestionClick(suggestion)}
                 style={{
                   padding: '4px 10px',
-                  background: '#f0f0f0',
-                  border: '1px solid #d0d0d0',
+                  background: currentTheme.suggestionBg,
+                  border: `1px solid ${currentTheme.suggestionBorder}`,
                   borderRadius: '12px',
                   fontSize: '11px',
-                  color: '#666',
+                  color: currentTheme.suggestionText,
                   cursor: 'pointer',
                   transition: 'all 0.2s'
                 }}
-                onMouseOver={(e) => e.currentTarget.style.background = '#e0e0e0'}
-                onMouseOut={(e) => e.currentTarget.style.background = '#f0f0f0'}
+                onMouseOver={(e) => e.currentTarget.style.background = currentTheme.suggestionHover}
+                onMouseOut={(e) => e.currentTarget.style.background = currentTheme.suggestionBg}
               >
                 {suggestion}
               </button>
@@ -466,11 +553,14 @@ function App() {
               style={{
                 flex: 1,
                 padding: '12px 16px',
-                border: '2px solid #e0e0e0',
+                border: `2px solid ${currentTheme.inputBorder}`,
                 borderRadius: '24px',
                 fontSize: '14px',
                 fontFamily: 'monospace',
-                outline: 'none'
+                outline: 'none',
+                background: currentTheme.messageBg,
+                color: currentTheme.messageText,
+                transition: 'all 0.3s ease'
               }}
             />
             <button
@@ -478,7 +568,7 @@ function App() {
               disabled={!terminalInput.trim()}
               style={{
                 padding: '12px 24px',
-                background: terminalInput.trim() ? '#667eea' : '#ccc',
+                background: terminalInput.trim() ? currentTheme.buttonBg : currentTheme.buttonDisabled,
                 color: 'white',
                 border: 'none',
                 borderRadius: '24px',
@@ -495,11 +585,12 @@ function App() {
 
         <p style={{ 
           textAlign: 'center', 
-          color: '#999', 
+          color: currentTheme.footerText, 
           fontSize: '12px', 
           padding: '8px',
           margin: 0,
-          background: 'white'
+          background: currentTheme.inputBg,
+          transition: 'all 0.3s ease'
         }}>
           Press ESC to exit
         </p>
@@ -507,7 +598,7 @@ function App() {
     );
   }
 
-  // REAL MODE - Same UI as FAKE but with actual functionality
+  // REAL MODE - Same UI as before (unchanged)
   return (
     <div style={{ 
       background: '#f5f5f5', 

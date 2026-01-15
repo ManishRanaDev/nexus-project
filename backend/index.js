@@ -144,6 +144,22 @@ app.get('/debug-info', (req, res) => {
   });
 });
 
+// Test endpoint for debugging
+app.post('/test-send', async (req, res) => {
+  if (!clientIsReady()) {
+    return res.status(503).json({ error: 'Client not ready' });
+  }
+  
+  try {
+    console.log('Testing send to:', TARGET_CONTACT);
+    const result = await client.sendMessage(TARGET_CONTACT, 'Test message from backend', { sendSeen: false });
+    res.json({ success: true, result });
+  } catch (err) {
+    console.error('Test send failed:', err);
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 // --------- Client events ----------
 client.on('qr', (qr) => {
   latestQR = qr;
@@ -289,14 +305,19 @@ io.on('connection', (socket) => {
     else socket.emit('disconnected');
   });
 
+  // ✅ FIXED: Added { sendSeen: false } to bypass WhatsApp Web API breaking change
   socket.on('send_message', async ({ message }) => {
     if (!clientIsReady()) {
       console.error('Attempt to send message while client not ready');
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
     try {
-      await client.sendMessage(TARGET_CONTACT, message);
-      console.log(`📤 Sent to ${TARGET_CONTACT}: ${message}`);
+      console.log(`📤 Attempting to send to ${TARGET_CONTACT}: ${message}`);
+      
+      // Send message without sendSeen to avoid WhatsApp Web API issue
+      await client.sendMessage(TARGET_CONTACT, message, { sendSeen: false });
+      
+      console.log(`✅ Sent successfully to ${TARGET_CONTACT}: ${message}`);
       socket.emit('send_result', { ok: true });
     } catch (err) {
       console.error('❌ Failed to send:', err && err.stack ? err.stack : err);
@@ -304,6 +325,7 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ✅ FIXED: Added { sendSeen: false } for media sending too
   socket.on('send_media', async ({ base64, mimetype, filename }) => {
     if (!clientIsReady()) {
       console.error('Attempt to send media while client not ready');
@@ -312,7 +334,9 @@ io.on('connection', (socket) => {
     try {
       const base64Body = base64.includes(',') ? base64.split(',')[1] : base64;
       const media = new MessageMedia(mimetype, base64Body, filename);
-      await client.sendMessage(TARGET_CONTACT, media);
+      
+      // Send media without sendSeen to avoid WhatsApp Web API issue
+      await client.sendMessage(TARGET_CONTACT, media, { sendSeen: false });
 
       io.emit('message', {
         from: client.info.wid?._serialized || null,

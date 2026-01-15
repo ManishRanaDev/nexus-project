@@ -61,11 +61,6 @@ function clientIsReady() {
   return !!(client && client.info && client.info.wid && isClientReady);
 }
 
-async function safeGetChats() {
-  if (!clientIsReady()) throw new Error('WhatsApp client not ready');
-  return client.getChats();
-}
-
 // --------- HTTP routes ----------
 app.get('/health', (req, res) => {
   if (clientIsReady()) {
@@ -77,6 +72,7 @@ app.get('/health', (req, res) => {
   }
 });
 
+// ✅ FIXED: Better sync endpoint with direct chat access
 app.get('/sync-messages', async (req, res) => {
   if (!clientIsReady()) {
     console.error('Sync aborted: WhatsApp client not ready');
@@ -84,15 +80,65 @@ app.get('/sync-messages', async (req, res) => {
   }
 
   try {
-    const chats = await safeGetChats();
     const synced = [];
-
-    for (const chat of chats) {
-      // try-catch each chat so one bad chat doesn't abort the whole loop
-      try {
-        const messages = await chat.fetchMessages({ limit: 100 });
+    
+    // Try to get the specific chat directly instead of listing all chats
+    try {
+      console.log(`Attempting to get chat directly: ${TARGET_CONTACT}`);
+      const targetChat = await client.getChatById(TARGET_CONTACT);
+      
+      if (targetChat) {
+        console.log(`✅ Found target chat: ${TARGET_CONTACT}`);
+        const messages = await targetChat.fetchMessages({ limit: 100 });
+        console.log(`Fetched ${messages.length} messages`);
+        
         for (const msg of messages) {
-          if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
+          let mediaUrl = null;
+          if (msg.hasMedia) {
+            try {
+              const media = await msg.downloadMedia();
+              if (media && media.data) {
+                const buffer = Buffer.from(media.data, 'base64');
+                const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'bin';
+                const filename = safeFilename(ext);
+                const filepath = path.join(MEDIA_DIR, filename);
+                fs.writeFileSync(filepath, buffer);
+                mediaUrl = `${BASE_URL}/media/${filename}`;
+              }
+            } catch (mErr) {
+              console.error('Failed downloading media for a message:', mErr && mErr.stack ? mErr.stack : mErr);
+            }
+          }
+
+          const payload = {
+            from: msg.from,
+            to: msg.to,
+            body: msg.body,
+            timestamp: msg.timestamp,
+            mediaUrl,
+            mimetype: msg._data?.mimetype || null
+          };
+
+          io.emit('message', payload);
+          synced.push(payload);
+        }
+      } else {
+        console.warn('Target chat not found');
+      }
+    } catch (directErr) {
+      console.warn('Could not get chat directly:', directErr.message);
+      
+      // Fallback: try getChats with error handling
+      try {
+        console.log('Trying fallback method with getChats()...');
+        const chats = await client.getChats();
+        const targetChat = chats.find(chat => chat.id._serialized === TARGET_CONTACT);
+        
+        if (targetChat) {
+          console.log(`✅ Found target chat via fallback: ${TARGET_CONTACT}`);
+          const messages = await targetChat.fetchMessages({ limit: 100 });
+          
+          for (const msg of messages) {
             let mediaUrl = null;
             if (msg.hasMedia) {
               try {
@@ -122,16 +168,33 @@ app.get('/sync-messages', async (req, res) => {
             io.emit('message', payload);
             synced.push(payload);
           }
+        } else {
+          console.warn('Target chat not found in fallback method');
         }
-      } catch (chatErr) {
-        console.warn(`Failed processing chat ${chat.id?.serialized || chat.id}:`, chatErr && chatErr.message ? chatErr.message : chatErr);
+      } catch (fallbackErr) {
+        console.error('Both direct and fallback methods failed:', fallbackErr.message);
+        // Don't throw - return partial success
+        return res.status(200).json({ 
+          message: 'Sync completed with errors', 
+          count: synced.length,
+          success: false,
+          error: 'Could not access chat history'
+        });
       }
     }
 
-    res.status(200).json({ message: 'Messages synced', count: synced.length });
+    res.status(200).json({ 
+      message: 'Messages synced', 
+      count: synced.length,
+      success: true
+    });
   } catch (err) {
     console.error('❌ Sync failed:', err && err.stack ? err.stack : err);
-    res.status(500).json({ error: 'Sync failed', detail: String(err && err.message ? err.message : err) });
+    res.status(500).json({ 
+      error: 'Sync failed', 
+      detail: String(err && err.message ? err.message : err),
+      success: false 
+    });
   }
 });
 
@@ -186,46 +249,39 @@ client.on('ready', async () => {
 
     // Emit recent messages from target contact (best-effort)
     try {
-      const chats = await safeGetChats();
-      for (const chat of chats) {
-        try {
-          const messages = await chat.fetchMessages({ limit: 100 });
-          for (const msg of messages) {
-            if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
-              let mediaUrl = null;
-              if (msg.hasMedia) {
-                try {
-                  const media = await msg.downloadMedia();
-                  if (media && media.data) {
-                    const buffer = Buffer.from(media.data, 'base64');
-                    const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'bin';
-                    const filename = safeFilename(ext);
-                    const filepath = path.join(MEDIA_DIR, filename);
-                    fs.writeFileSync(filepath, buffer);
-                    mediaUrl = `${BASE_URL}/media/${filename}`;
-                  }
-                } catch (mErr) {
-                  console.warn('media download in ready handler failed:', mErr && mErr.message ? mErr.message : mErr);
-                }
+      const targetChat = await client.getChatById(TARGET_CONTACT);
+      if (targetChat) {
+        const messages = await targetChat.fetchMessages({ limit: 100 });
+        for (const msg of messages) {
+          let mediaUrl = null;
+          if (msg.hasMedia) {
+            try {
+              const media = await msg.downloadMedia();
+              if (media && media.data) {
+                const buffer = Buffer.from(media.data, 'base64');
+                const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'bin';
+                const filename = safeFilename(ext);
+                const filepath = path.join(MEDIA_DIR, filename);
+                fs.writeFileSync(filepath, buffer);
+                mediaUrl = `${BASE_URL}/media/${filename}`;
               }
-
-              io.emit('message', {
-                from: msg.from,
-                to: msg.to,
-                body: msg.body,
-                timestamp: msg.timestamp,
-                mediaUrl,
-                mimetype: msg._data?.mimetype || null
-              });
+            } catch (mErr) {
+              console.warn('media download in ready handler failed:', mErr && mErr.message ? mErr.message : mErr);
             }
           }
-        } catch (cErr) {
-          // continue with next chat
-          console.warn('Error fetching messages for a chat during ready handler:', cErr && cErr.message ? cErr.message : cErr);
+
+          io.emit('message', {
+            from: msg.from,
+            to: msg.to,
+            body: msg.body,
+            timestamp: msg.timestamp,
+            mediaUrl,
+            mimetype: msg._data?.mimetype || null
+          });
         }
       }
     } catch (err) {
-      console.warn('Could not fetch chats in ready handler:', err && err.message ? err.message : err);
+      console.warn('Could not fetch chat in ready handler:', err && err.message ? err.message : err);
     }
   } catch (err) {
     console.error('Error in ready handler:', err && err.stack ? err.stack : err);

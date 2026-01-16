@@ -33,8 +33,10 @@ app.use('/media', express.static(MEDIA_DIR));
 let mediaCounter = 0;
 let latestQR = null;
 let isClientReady = false;
+let messageCache = []; // Cache messages in memory
+const MAX_CACHE_SIZE = 100;
 
-// Create client
+// Create client with more stable Puppeteer settings
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
@@ -42,11 +44,13 @@ const client = new Client({
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
-      '--single-process',
       '--disable-dev-shm-usage',
       '--disable-gpu',
-      '--no-zygote'
-    ]
+      '--no-zygote',
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-blink-features=AutomationControlled'
+    ],
+    timeout: 60000
   }
 });
 
@@ -57,8 +61,16 @@ function safeFilename(ext = 'bin') {
 }
 
 function clientIsReady() {
-  // client.info?.wid is a good indicator of an authenticated session
   return !!(client && client.info && client.info.wid && isClientReady);
+}
+
+function addToCache(message) {
+  // Add message to cache
+  messageCache.unshift(message);
+  // Keep cache size limited
+  if (messageCache.length > MAX_CACHE_SIZE) {
+    messageCache = messageCache.slice(0, MAX_CACHE_SIZE);
+  }
 }
 
 // --------- HTTP routes ----------
@@ -72,7 +84,7 @@ app.get('/health', (req, res) => {
   }
 });
 
-// ✅ FIXED: Better sync endpoint with direct chat access
+// ✅ NEW: Return cached messages instead of fetching from WhatsApp
 app.get('/sync-messages', async (req, res) => {
   if (!clientIsReady()) {
     console.error('Sync aborted: WhatsApp client not ready');
@@ -80,114 +92,19 @@ app.get('/sync-messages', async (req, res) => {
   }
 
   try {
-    const synced = [];
+    console.log(`Returning ${messageCache.length} cached messages`);
     
-    // Try to get the specific chat directly instead of listing all chats
-    try {
-      console.log(`Attempting to get chat directly: ${TARGET_CONTACT}`);
-      const targetChat = await client.getChatById(TARGET_CONTACT);
-      
-      if (targetChat) {
-        console.log(`✅ Found target chat: ${TARGET_CONTACT}`);
-        const messages = await targetChat.fetchMessages({ limit: 100 });
-        console.log(`Fetched ${messages.length} messages`);
-        
-        for (const msg of messages) {
-          let mediaUrl = null;
-          if (msg.hasMedia) {
-            try {
-              const media = await msg.downloadMedia();
-              if (media && media.data) {
-                const buffer = Buffer.from(media.data, 'base64');
-                const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'bin';
-                const filename = safeFilename(ext);
-                const filepath = path.join(MEDIA_DIR, filename);
-                fs.writeFileSync(filepath, buffer);
-                mediaUrl = `${BASE_URL}/media/${filename}`;
-              }
-            } catch (mErr) {
-              console.error('Failed downloading media for a message:', mErr && mErr.stack ? mErr.stack : mErr);
-            }
-          }
-
-          const payload = {
-            from: msg.from,
-            to: msg.to,
-            body: msg.body,
-            timestamp: msg.timestamp,
-            mediaUrl,
-            mimetype: msg._data?.mimetype || null
-          };
-
-          io.emit('message', payload);
-          synced.push(payload);
-        }
-      } else {
-        console.warn('Target chat not found');
-      }
-    } catch (directErr) {
-      console.warn('Could not get chat directly:', directErr.message);
-      
-      // Fallback: try getChats with error handling
-      try {
-        console.log('Trying fallback method with getChats()...');
-        const chats = await client.getChats();
-        const targetChat = chats.find(chat => chat.id._serialized === TARGET_CONTACT);
-        
-        if (targetChat) {
-          console.log(`✅ Found target chat via fallback: ${TARGET_CONTACT}`);
-          const messages = await targetChat.fetchMessages({ limit: 100 });
-          
-          for (const msg of messages) {
-            let mediaUrl = null;
-            if (msg.hasMedia) {
-              try {
-                const media = await msg.downloadMedia();
-                if (media && media.data) {
-                  const buffer = Buffer.from(media.data, 'base64');
-                  const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'bin';
-                  const filename = safeFilename(ext);
-                  const filepath = path.join(MEDIA_DIR, filename);
-                  fs.writeFileSync(filepath, buffer);
-                  mediaUrl = `${BASE_URL}/media/${filename}`;
-                }
-              } catch (mErr) {
-                console.error('Failed downloading media for a message:', mErr && mErr.stack ? mErr.stack : mErr);
-              }
-            }
-
-            const payload = {
-              from: msg.from,
-              to: msg.to,
-              body: msg.body,
-              timestamp: msg.timestamp,
-              mediaUrl,
-              mimetype: msg._data?.mimetype || null
-            };
-
-            io.emit('message', payload);
-            synced.push(payload);
-          }
-        } else {
-          console.warn('Target chat not found in fallback method');
-        }
-      } catch (fallbackErr) {
-        console.error('Both direct and fallback methods failed:', fallbackErr.message);
-        // Don't throw - return partial success
-        return res.status(200).json({ 
-          message: 'Sync completed with errors', 
-          count: synced.length,
-          success: false,
-          error: 'Could not access chat history'
-        });
-      }
-    }
-
+    // Return cached messages
     res.status(200).json({ 
-      message: 'Messages synced', 
-      count: synced.length,
+      message: 'Messages synced from cache', 
+      count: messageCache.length,
+      messages: messageCache,
       success: true
     });
+
+    // Emit cached messages to socket
+    messageCache.forEach(msg => io.emit('message', msg));
+    
   } catch (err) {
     console.error('❌ Sync failed:', err && err.stack ? err.stack : err);
     res.status(500).json({ 
@@ -198,16 +115,25 @@ app.get('/sync-messages', async (req, res) => {
   }
 });
 
-// (Optional) quick debug info - remove in production if you don't want to expose info
+// NEW: Endpoint to get cache size
+app.get('/cache-info', (req, res) => {
+  res.json({
+    cacheSize: messageCache.length,
+    maxCacheSize: MAX_CACHE_SIZE,
+    oldestMessage: messageCache[messageCache.length - 1]?.timestamp || null,
+    newestMessage: messageCache[0]?.timestamp || null
+  });
+});
+
 app.get('/debug-info', (req, res) => {
   res.json({
     ready: clientIsReady(),
     info: client.info || null,
-    latestQR: !!latestQR
+    latestQR: !!latestQR,
+    cacheSize: messageCache.length
   });
 });
 
-// Test endpoint for debugging
 app.post('/test-send', async (req, res) => {
   if (!clientIsReady()) {
     return res.status(503).json({ error: 'Client not ready' });
@@ -247,12 +173,16 @@ client.on('ready', async () => {
     console.log('✅ WhatsApp client is ready!');
     io.emit('ready');
 
-    // Emit recent messages from target contact (best-effort)
+    // Try to load initial messages with proper error handling
     try {
+      console.log('Loading initial messages...');
       const targetChat = await client.getChatById(TARGET_CONTACT);
       if (targetChat) {
-        const messages = await targetChat.fetchMessages({ limit: 100 });
-        for (const msg of messages) {
+        const messages = await targetChat.fetchMessages({ limit: 50 });
+        console.log(`Loaded ${messages.length} initial messages`);
+        
+        // Process messages and add to cache
+        for (const msg of messages.reverse()) { // Reverse to maintain chronological order
           let mediaUrl = null;
           if (msg.hasMedia) {
             try {
@@ -266,22 +196,27 @@ client.on('ready', async () => {
                 mediaUrl = `${BASE_URL}/media/${filename}`;
               }
             } catch (mErr) {
-              console.warn('media download in ready handler failed:', mErr && mErr.message ? mErr.message : mErr);
+              console.warn('media download failed:', mErr && mErr.message ? mErr.message : mErr);
             }
           }
 
-          io.emit('message', {
+          const payload = {
             from: msg.from,
             to: msg.to,
             body: msg.body,
             timestamp: msg.timestamp,
             mediaUrl,
             mimetype: msg._data?.mimetype || null
-          });
+          };
+
+          addToCache(payload);
+          io.emit('message', payload);
         }
+        console.log('✅ Initial messages cached and emitted');
       }
     } catch (err) {
-      console.warn('Could not fetch chat in ready handler:', err && err.message ? err.message : err);
+      console.warn('Could not load initial messages:', err && err.message ? err.message : err);
+      console.log('Will rely on live message handling instead');
     }
   } catch (err) {
     console.error('Error in ready handler:', err && err.stack ? err.stack : err);
@@ -309,14 +244,21 @@ client.on('message', async (msg) => {
       }
 
       console.log(`📥 [${msg.from}] ${msg.body}`);
-      io.emit('message', {
+      
+      const payload = {
         from: msg.from,
         to: msg.to,
         body: msg.body,
         timestamp: msg.timestamp,
         mediaUrl,
         mimetype: msg._data?.mimetype || null
-      });
+      };
+
+      // Add to cache
+      addToCache(payload);
+      
+      // Emit to socket
+      io.emit('message', payload);
     }
   } catch (err) {
     console.error('Error handling incoming message:', err && err.stack ? err.stack : err);
@@ -328,7 +270,10 @@ client.on('disconnected', (reason) => {
   isClientReady = false;
   io.emit('disconnected', reason);
 
-  // Avoid spamming initialize calls — do a delayed reconnect
+  // Clear cache on disconnect
+  messageCache = [];
+
+  // Delayed reconnect
   setTimeout(() => {
     try {
       console.log(`Attempting to re-initialize client after ${RECONNECT_DELAY_MS}ms...`);
@@ -343,7 +288,6 @@ client.on('change_state', (state) => {
   console.log('📶 State changed:', state);
 });
 
-// Generic error logging for client internals (best-effort)
 client.on('error', (err) => {
   console.error('Client error event:', err && err.stack ? err.stack : err);
 });
@@ -352,8 +296,14 @@ client.on('error', (err) => {
 io.on('connection', (socket) => {
   console.log('🔌 Frontend connected');
 
-  if (clientIsReady()) socket.emit('ready');
-  else if (latestQR) socket.emit('qr', latestQR);
+  if (clientIsReady()) {
+    socket.emit('ready');
+    // Send cached messages to newly connected client
+    console.log(`Sending ${messageCache.length} cached messages to new client`);
+    messageCache.forEach(msg => socket.emit('message', msg));
+  } else if (latestQR) {
+    socket.emit('qr', latestQR);
+  }
 
   socket.on('request_status', () => {
     if (clientIsReady()) socket.emit('ready');
@@ -361,7 +311,6 @@ io.on('connection', (socket) => {
     else socket.emit('disconnected');
   });
 
-  // ✅ FIXED: Added { sendSeen: false } to bypass WhatsApp Web API breaking change
   socket.on('send_message', async ({ message }) => {
     if (!clientIsReady()) {
       console.error('Attempt to send message while client not ready');
@@ -370,8 +319,18 @@ io.on('connection', (socket) => {
     try {
       console.log(`📤 Attempting to send to ${TARGET_CONTACT}: ${message}`);
       
-      // Send message without sendSeen to avoid WhatsApp Web API issue
       await client.sendMessage(TARGET_CONTACT, message, { sendSeen: false });
+      
+      // Add sent message to cache
+      const payload = {
+        from: client.info.wid?._serialized || 'me',
+        to: TARGET_CONTACT,
+        body: message,
+        timestamp: Date.now(),
+        mediaUrl: null,
+        mimetype: null
+      };
+      addToCache(payload);
       
       console.log(`✅ Sent successfully to ${TARGET_CONTACT}: ${message}`);
       socket.emit('send_result', { ok: true });
@@ -381,7 +340,6 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ✅ FIXED: Added { sendSeen: false } for media sending too
   socket.on('send_media', async ({ base64, mimetype, filename }) => {
     if (!clientIsReady()) {
       console.error('Attempt to send media while client not ready');
@@ -391,17 +349,19 @@ io.on('connection', (socket) => {
       const base64Body = base64.includes(',') ? base64.split(',')[1] : base64;
       const media = new MessageMedia(mimetype, base64Body, filename);
       
-      // Send media without sendSeen to avoid WhatsApp Web API issue
       await client.sendMessage(TARGET_CONTACT, media, { sendSeen: false });
 
-      io.emit('message', {
-        from: client.info.wid?._serialized || null,
+      const payload = {
+        from: client.info.wid?._serialized || 'me',
         to: TARGET_CONTACT,
         body: '',
         timestamp: Date.now(),
         mediaUrl: null,
         mimetype
-      });
+      };
+      
+      addToCache(payload);
+      io.emit('message', payload);
 
       console.log(`📤 Sent media to ${TARGET_CONTACT}: ${filename}`);
       socket.emit('send_result', { ok: true });

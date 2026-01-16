@@ -22,7 +22,10 @@ const io = socketIO(server, {
   cors: {
     origin: '*',
     methods: ['GET', 'POST']
-  }
+  },
+  // Add ping/pong for keeping connection alive
+  pingInterval: 10000,
+  pingTimeout: 5000,
 });
 
 app.use(cors());
@@ -35,6 +38,7 @@ let latestQR = null;
 let isClientReady = false;
 let messageCache = []; // Cache messages in memory
 const MAX_CACHE_SIZE = 100;
+let connectedClients = new Set(); // Track connected clients
 
 // Create client with more stable Puppeteer settings
 const client = new Client({
@@ -65,26 +69,40 @@ function clientIsReady() {
 }
 
 function addToCache(message) {
-  // Add message to cache
-  messageCache.unshift(message);
-  // Keep cache size limited
-  if (messageCache.length > MAX_CACHE_SIZE) {
-    messageCache = messageCache.slice(0, MAX_CACHE_SIZE);
+  // Check if message already exists (by timestamp and body)
+  const exists = messageCache.some(m => 
+    m.timestamp === message.timestamp && 
+    m.body === message.body &&
+    m.from === message.from
+  );
+  
+  if (!exists) {
+    messageCache.unshift(message);
+    // Keep cache size limited
+    if (messageCache.length > MAX_CACHE_SIZE) {
+      messageCache = messageCache.slice(0, MAX_CACHE_SIZE);
+    }
+    return true;
   }
+  return false;
+}
+
+function broadcastToClients(event, data) {
+  console.log(`📡 Broadcasting ${event} to ${connectedClients.size} clients`);
+  io.emit(event, data);
 }
 
 // --------- HTTP routes ----------
 app.get('/health', (req, res) => {
   if (clientIsReady()) {
-    res.status(200).json({ status: 'connected' });
+    res.status(200).json({ status: 'connected', clients: connectedClients.size });
   } else if (latestQR) {
-    res.status(200).json({ status: 'qr_required' });
+    res.status(200).json({ status: 'qr_required', clients: connectedClients.size });
   } else {
-    res.status(200).json({ status: 'disconnected' });
+    res.status(200).json({ status: 'disconnected', clients: connectedClients.size });
   }
 });
 
-// ✅ NEW: Return cached messages instead of fetching from WhatsApp
 app.get('/sync-messages', async (req, res) => {
   if (!clientIsReady()) {
     console.error('Sync aborted: WhatsApp client not ready');
@@ -92,18 +110,18 @@ app.get('/sync-messages', async (req, res) => {
   }
 
   try {
-    console.log(`Returning ${messageCache.length} cached messages`);
+    console.log(`📤 Returning ${messageCache.length} cached messages`);
     
-    // Return cached messages
     res.status(200).json({ 
       message: 'Messages synced from cache', 
       count: messageCache.length,
-      messages: messageCache,
       success: true
     });
 
-    // Emit cached messages to socket
-    messageCache.forEach(msg => io.emit('message', msg));
+    // Broadcast cached messages to all clients
+    messageCache.slice().reverse().forEach(msg => {
+      broadcastToClients('message', msg);
+    });
     
   } catch (err) {
     console.error('❌ Sync failed:', err && err.stack ? err.stack : err);
@@ -115,11 +133,11 @@ app.get('/sync-messages', async (req, res) => {
   }
 });
 
-// NEW: Endpoint to get cache size
 app.get('/cache-info', (req, res) => {
   res.json({
     cacheSize: messageCache.length,
     maxCacheSize: MAX_CACHE_SIZE,
+    connectedClients: connectedClients.size,
     oldestMessage: messageCache[messageCache.length - 1]?.timestamp || null,
     newestMessage: messageCache[0]?.timestamp || null
   });
@@ -130,7 +148,8 @@ app.get('/debug-info', (req, res) => {
     ready: clientIsReady(),
     info: client.info || null,
     latestQR: !!latestQR,
-    cacheSize: messageCache.length
+    cacheSize: messageCache.length,
+    connectedClients: connectedClients.size
   });
 });
 
@@ -153,9 +172,9 @@ app.post('/test-send', async (req, res) => {
 client.on('qr', (qr) => {
   latestQR = qr;
   isClientReady = false;
-  console.log('QR RECEIVED');
+  console.log('📱 QR RECEIVED');
   qrcode.generate(qr, { small: true });
-  io.emit('qr', qr);
+  broadcastToClients('qr', qr);
 });
 
 client.on('authenticated', () => {
@@ -165,24 +184,25 @@ client.on('authenticated', () => {
 
 client.on('auth_failure', (msg) => {
   console.error('❌ Auth failed:', msg);
+  broadcastToClients('auth_failure', { error: msg });
 });
 
 client.on('ready', async () => {
   try {
     isClientReady = true;
     console.log('✅ WhatsApp client is ready!');
-    io.emit('ready');
+    broadcastToClients('ready', { status: 'connected' });
 
-    // Try to load initial messages with proper error handling
+    // Load initial messages
     try {
-      console.log('Loading initial messages...');
+      console.log('📥 Loading initial messages...');
       const targetChat = await client.getChatById(TARGET_CONTACT);
       if (targetChat) {
         const messages = await targetChat.fetchMessages({ limit: 50 });
         console.log(`Loaded ${messages.length} initial messages`);
         
-        // Process messages and add to cache
-        for (const msg of messages.reverse()) { // Reverse to maintain chronological order
+        // Process messages in chronological order
+        for (const msg of messages.reverse()) {
           let mediaUrl = null;
           if (msg.hasMedia) {
             try {
@@ -196,7 +216,7 @@ client.on('ready', async () => {
                 mediaUrl = `${BASE_URL}/media/${filename}`;
               }
             } catch (mErr) {
-              console.warn('media download failed:', mErr && mErr.message ? mErr.message : mErr);
+              console.warn('Media download failed:', mErr.message);
             }
           }
 
@@ -210,19 +230,26 @@ client.on('ready', async () => {
           };
 
           addToCache(payload);
-          io.emit('message', payload);
         }
-        console.log('✅ Initial messages cached and emitted');
+        
+        console.log(`✅ Cached ${messageCache.length} messages`);
+        
+        // Broadcast all cached messages to connected clients
+        console.log('📡 Broadcasting initial messages to all clients...');
+        messageCache.slice().reverse().forEach(msg => {
+          broadcastToClients('message', msg);
+        });
       }
     } catch (err) {
-      console.warn('Could not load initial messages:', err && err.message ? err.message : err);
-      console.log('Will rely on live message handling instead');
+      console.warn('Could not load initial messages:', err.message);
+      console.log('Will rely on live message handling');
     }
   } catch (err) {
-    console.error('Error in ready handler:', err && err.stack ? err.stack : err);
+    console.error('Error in ready handler:', err.stack);
   }
 });
 
+// ✅ CRITICAL: Real-time message handler
 client.on('message', async (msg) => {
   try {
     if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
@@ -239,11 +266,12 @@ client.on('message', async (msg) => {
             mediaUrl = `${BASE_URL}/media/${filename}`;
           }
         } catch (mErr) {
-          console.warn('Failed to download media for inbound message:', mErr && mErr.message ? mErr.message : mErr);
+          console.warn('Failed to download media:', mErr.message);
         }
       }
 
-      console.log(`📥 [${msg.from}] ${msg.body}`);
+      const direction = msg.fromMe ? '📤' : '📥';
+      console.log(`${direction} [${msg.from}] ${msg.body || '[Media]'}`);
       
       const payload = {
         from: msg.from,
@@ -255,73 +283,119 @@ client.on('message', async (msg) => {
       };
 
       // Add to cache
-      addToCache(payload);
+      const isNew = addToCache(payload);
       
-      // Emit to socket
-      io.emit('message', payload);
+      // ALWAYS broadcast to ALL connected clients for real-time sync
+      if (isNew) {
+        console.log(`📡 Broadcasting new message to ${connectedClients.size} clients`);
+        broadcastToClients('message', payload);
+      }
     }
   } catch (err) {
-    console.error('Error handling incoming message:', err && err.stack ? err.stack : err);
+    console.error('Error handling incoming message:', err.stack);
+  }
+});
+
+client.on('message_create', async (msg) => {
+  // This event fires for messages we send
+  try {
+    if (msg.to === TARGET_CONTACT && msg.fromMe) {
+      const payload = {
+        from: msg.from || (client.info.wid?._serialized || 'me'),
+        to: msg.to,
+        body: msg.body,
+        timestamp: msg.timestamp || Date.now(),
+        mediaUrl: null,
+        mimetype: null
+      };
+
+      const isNew = addToCache(payload);
+      if (isNew) {
+        console.log(`📤 Broadcasting sent message to ${connectedClients.size} clients`);
+        broadcastToClients('message', payload);
+      }
+    }
+  } catch (err) {
+    console.error('Error in message_create handler:', err.message);
   }
 });
 
 client.on('disconnected', (reason) => {
   console.error('❌ WhatsApp disconnected:', reason);
   isClientReady = false;
-  io.emit('disconnected', reason);
+  broadcastToClients('disconnected', { reason });
 
   // Clear cache on disconnect
   messageCache = [];
 
-  // Delayed reconnect
   setTimeout(() => {
     try {
-      console.log(`Attempting to re-initialize client after ${RECONNECT_DELAY_MS}ms...`);
-      client.initialize().catch(e => console.error('Re-init failed:', e && e.stack ? e.stack : e));
+      console.log(`Attempting to re-initialize after ${RECONNECT_DELAY_MS}ms...`);
+      client.initialize().catch(e => console.error('Re-init failed:', e.stack));
     } catch (e) {
-      console.error('Error scheduling re-initialize:', e && e.stack ? e.stack : e);
+      console.error('Error scheduling re-initialize:', e.stack);
     }
   }, RECONNECT_DELAY_MS);
 });
 
 client.on('change_state', (state) => {
   console.log('📶 State changed:', state);
+  broadcastToClients('state_change', { state });
 });
 
 client.on('error', (err) => {
-  console.error('Client error event:', err && err.stack ? err.stack : err);
+  console.error('Client error event:', err.stack);
 });
 
 // --------- Socket.IO ----------
 io.on('connection', (socket) => {
-  console.log('🔌 Frontend connected');
+  connectedClients.add(socket.id);
+  console.log(`🔌 Client connected [${socket.id}] - Total: ${connectedClients.size}`);
 
+  // Send current status
   if (clientIsReady()) {
-    socket.emit('ready');
-    // Send cached messages to newly connected client
-    console.log(`Sending ${messageCache.length} cached messages to new client`);
-    messageCache.forEach(msg => socket.emit('message', msg));
+    socket.emit('ready', { status: 'connected' });
+    
+    // Send all cached messages to newly connected client
+    if (messageCache.length > 0) {
+      console.log(`📤 Sending ${messageCache.length} cached messages to new client`);
+      messageCache.slice().reverse().forEach(msg => {
+        socket.emit('message', msg);
+      });
+    }
   } else if (latestQR) {
     socket.emit('qr', latestQR);
+  } else {
+    socket.emit('disconnected', { reason: 'not_ready' });
   }
 
+  socket.on('disconnect', () => {
+    connectedClients.delete(socket.id);
+    console.log(`🔌 Client disconnected [${socket.id}] - Total: ${connectedClients.size}`);
+  });
+
   socket.on('request_status', () => {
-    if (clientIsReady()) socket.emit('ready');
-    else if (latestQR) socket.emit('qr', latestQR);
-    else socket.emit('disconnected');
+    if (clientIsReady()) {
+      socket.emit('ready', { status: 'connected' });
+    } else if (latestQR) {
+      socket.emit('qr', latestQR);
+    } else {
+      socket.emit('disconnected', { reason: 'not_ready' });
+    }
   });
 
   socket.on('send_message', async ({ message }) => {
     if (!clientIsReady()) {
-      console.error('Attempt to send message while client not ready');
+      console.error('❌ Send failed: client not ready');
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
+    
     try {
-      console.log(`📤 Attempting to send to ${TARGET_CONTACT}: ${message}`);
+      console.log(`📤 Sending: "${message}" to ${TARGET_CONTACT}`);
       
       await client.sendMessage(TARGET_CONTACT, message, { sendSeen: false });
       
-      // Add sent message to cache
+      // Create payload for sent message
       const payload = {
         from: client.info.wid?._serialized || 'me',
         to: TARGET_CONTACT,
@@ -330,55 +404,71 @@ io.on('connection', (socket) => {
         mediaUrl: null,
         mimetype: null
       };
-      addToCache(payload);
       
-      console.log(`✅ Sent successfully to ${TARGET_CONTACT}: ${message}`);
+      // Add to cache
+      const isNew = addToCache(payload);
+      
+      // Broadcast to all clients immediately
+      if (isNew) {
+        console.log(`📡 Broadcasting sent message to ${connectedClients.size} clients`);
+        broadcastToClients('message', payload);
+      }
+      
+      console.log(`✅ Message sent successfully`);
       socket.emit('send_result', { ok: true });
+      
     } catch (err) {
-      console.error('❌ Failed to send:', err && err.stack ? err.stack : err);
-      socket.emit('send_result', { ok: false, error: String(err && err.message ? err.message : err) });
+      console.error('❌ Send failed:', err.stack);
+      socket.emit('send_result', { ok: false, error: String(err.message) });
     }
   });
 
   socket.on('send_media', async ({ base64, mimetype, filename }) => {
     if (!clientIsReady()) {
-      console.error('Attempt to send media while client not ready');
+      console.error('❌ Send media failed: client not ready');
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
+    
     try {
       const base64Body = base64.includes(',') ? base64.split(',')[1] : base64;
       const media = new MessageMedia(mimetype, base64Body, filename);
       
+      console.log(`📤 Sending media: ${filename} to ${TARGET_CONTACT}`);
       await client.sendMessage(TARGET_CONTACT, media, { sendSeen: false });
 
       const payload = {
         from: client.info.wid?._serialized || 'me',
         to: TARGET_CONTACT,
-        body: '',
+        body: `[Media: ${filename}]`,
         timestamp: Date.now(),
         mediaUrl: null,
         mimetype
       };
       
-      addToCache(payload);
-      io.emit('message', payload);
+      const isNew = addToCache(payload);
+      if (isNew) {
+        broadcastToClients('message', payload);
+      }
 
-      console.log(`📤 Sent media to ${TARGET_CONTACT}: ${filename}`);
+      console.log(`✅ Media sent successfully`);
       socket.emit('send_result', { ok: true });
+      
     } catch (err) {
-      console.error('❌ Failed to send media:', err && err.stack ? err.stack : err);
-      socket.emit('send_result', { ok: false, error: String(err && err.message ? err.message : err) });
+      console.error('❌ Send media failed:', err.stack);
+      socket.emit('send_result', { ok: false, error: String(err.message) });
     }
   });
 });
 
 // --------- Start server & initialize client ----------
 const PORT = parseInt(process.env.PORT || '3001', 10);
-server.listen(PORT, () => console.log(`🚀 Backend running on http://localhost:${PORT}`));
+server.listen(PORT, () => {
+  console.log(`🚀 Backend running on http://localhost:${PORT}`);
+  console.log(`📱 Target contact: ${TARGET_CONTACT}`);
+});
 
-// initialize client and catch top-level initialization errors
 client.initialize().catch(err => {
-  console.error('Failed to initialize WhatsApp client:', err && err.stack ? err.stack : err);
+  console.error('Failed to initialize WhatsApp client:', err.stack);
 });
 
 // --------- Periodic cleanup ----------
@@ -386,41 +476,52 @@ setInterval(() => {
   try {
     const now = Date.now();
     const files = fs.readdirSync(MEDIA_DIR);
+    let deletedCount = 0;
+    
     files.forEach(file => {
       try {
         const filePath = path.join(MEDIA_DIR, file);
         const stats = fs.statSync(filePath);
-        const age = (now - stats.mtimeMs) / (1000 * 60 * 60 * 24); // days
+        const age = (now - stats.mtimeMs) / (1000 * 60 * 60 * 24);
         if (age > 15) {
           fs.unlinkSync(filePath);
-          console.log(`🧹 Deleted old media: ${file}`);
+          deletedCount++;
         }
       } catch (e) {
-        console.warn('Error while cleaning media file', file, e && e.message ? e.message : e);
+        console.warn('Error cleaning file', file, e.message);
       }
     });
+    
+    if (deletedCount > 0) {
+      console.log(`🧹 Deleted ${deletedCount} old media files`);
+    }
   } catch (err) {
-    console.error('Error in media cleanup interval:', err && err.stack ? err.stack : err);
+    console.error('Error in media cleanup:', err.message);
   }
-}, 1000 * 60 * 60 * 12); // every 12 hours
+}, 1000 * 60 * 60 * 12);
 
 // --------- Graceful shutdown ----------
 async function shutdown(signal) {
   try {
-    console.log(`Received ${signal}. Shutting down server...`);
+    console.log(`Received ${signal}. Shutting down...`);
     isClientReady = false;
-    try { await client.destroy(); } catch (e) { /* ignore errors on destroy */ }
+    
+    // Notify all clients
+    broadcastToClients('server_shutdown', { reason: signal });
+    
+    try { await client.destroy(); } catch (e) { /* ignore */ }
+    
     server.close(() => {
-      console.log('HTTP server closed.');
+      console.log('Server closed.');
       process.exit(0);
     });
-    // force exit after 5s
+    
     setTimeout(() => {
       console.warn('Forcing shutdown.');
       process.exit(1);
     }, 5000);
   } catch (err) {
-    console.error('Error during shutdown:', err && err.stack ? err.stack : err);
+    console.error('Error during shutdown:', err.stack);
     process.exit(1);
   }
 }

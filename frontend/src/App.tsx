@@ -60,7 +60,12 @@ function App() {
 
   // Audio ref for keeping app alive on iOS
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  
+
+  // Notification permission state
+  const [notificationPermission, setNotificationPermission] = useState<NotificationPermission>(
+    'Notification' in window ? Notification.permission : 'denied'
+  );
+
   // Terminal chat states for FAKE mode
   const [terminalMessages, setTerminalMessages] = useState<{command: string, response: string, timestamp: string}[]>([
     { 
@@ -173,14 +178,21 @@ function App() {
     return null;
   };
 
-  // Request notification permission
+  // Request notification permission (must be called from user interaction on iOS)
   const requestNotificationPermission = async () => {
-    if ('Notification' in window && Notification.permission === 'default') {
+    if ('Notification' in window) {
       try {
         const permission = await Notification.requestPermission();
         console.log('Notification permission:', permission);
+        setNotificationPermission(permission);
+
+        if (permission === 'granted') {
+          // Show a test notification
+          showNexusNotification();
+        }
       } catch (err) {
-        console.log('Notification permission denied');
+        console.log('Notification permission denied:', err);
+        setNotificationPermission('denied');
       }
     }
   };
@@ -264,14 +276,17 @@ function App() {
     return randomResponses[Math.floor(Math.random() * randomResponses.length)];
   };
 
-  // Register Service Worker and request notifications on mount
+  // Register Service Worker on mount (notifications require user interaction)
   useEffect(() => {
-    const initializeApp = async () => {
-      await registerServiceWorker();
-      await requestNotificationPermission();
-    };
-    initializeApp();
+    registerServiceWorker();
   }, []);
+
+  // Update notification permission state when it changes
+  useEffect(() => {
+    if ('Notification' in window) {
+      setNotificationPermission(Notification.permission);
+    }
+  }, [mode]);
 
   useEffect(() => {
     if (mode === 'REAL') {
@@ -566,6 +581,36 @@ function App() {
           </div>
         </div>
 
+        {/* Notification Permission Banner */}
+        {notificationPermission !== 'granted' && (
+          <div style={{
+            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            color: 'white',
+            padding: '12px 24px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            fontSize: '13px'
+          }}>
+            <span>🔔 Enable notifications to receive alerts</span>
+            <button
+              onClick={requestNotificationPermission}
+              style={{
+                padding: '6px 16px',
+                background: 'white',
+                color: '#667eea',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '13px',
+                fontWeight: '600'
+              }}
+            >
+              Enable
+            </button>
+          </div>
+        )}
+
         {/* Messages Container */}
         <div style={{
           flex: 1,
@@ -780,6 +825,44 @@ function App() {
           </button>
         </div>
       </div>
+
+      {/* Notification Permission Banner */}
+      {notificationPermission !== 'granted' && (
+        <div style={{
+          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+          color: 'white',
+          padding: '16px 24px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
+        }}>
+          <div>
+            <p style={{ margin: 0, fontWeight: '600', fontSize: '14px' }}>
+              🔔 Enable Notifications
+            </p>
+            <p style={{ margin: '4px 0 0 0', fontSize: '12px', opacity: 0.9 }}>
+              Tap to receive Nexus Server alerts for incoming messages
+            </p>
+          </div>
+          <button
+            onClick={requestNotificationPermission}
+            style={{
+              padding: '10px 20px',
+              background: 'white',
+              color: '#667eea',
+              border: 'none',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontSize: '14px',
+              fontWeight: '600',
+              boxShadow: '0 2px 4px rgba(0,0,0,0.2)'
+            }}
+          >
+            Enable
+          </button>
+        </div>
+      )}
 
       {/* QR Code Display */}
       {!ready && qr && (

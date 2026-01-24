@@ -1,12 +1,15 @@
 // ✅ FRONTEND with enhanced terminal commands, random responses, and dark/light mode
 
-import React, { useState, useEffect, ChangeEvent } from 'react';
+import React, { useState, useEffect, ChangeEvent, useRef } from 'react';
 import io from 'socket.io-client';
 import { QRCodeCanvas } from 'qrcode.react';
 
 const socket = io('https://nexubacksend.shop', {
   transports: ['websocket'],
-  secure: true
+  secure: true,
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionAttempts: Infinity
 });
 const CONTACT_ID = '918299515901@c.us';
 const STORAGE_KEY = 'nexus-chat-918299515901';
@@ -48,12 +51,15 @@ function App() {
   });
   const [newMessage, setNewMessage] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  
+
   // Theme state
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
     const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
     return savedTheme === 'dark';
   });
+
+  // Audio ref for keeping app alive on iOS
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   
   // Terminal chat states for FAKE mode
   const [terminalMessages, setTerminalMessages] = useState<{command: string, response: string, timestamp: string}[]>([
@@ -152,28 +158,79 @@ function App() {
     localStorage.setItem(THEME_STORAGE_KEY, newTheme ? 'dark' : 'light');
   };
 
+  // Register Service Worker
+  const registerServiceWorker = async () => {
+    if ('serviceWorker' in navigator) {
+      try {
+        const registration = await navigator.serviceWorker.register('/service-worker.js');
+        console.log('Service Worker registered:', registration);
+        return registration;
+      } catch (err) {
+        console.log('Service Worker registration failed:', err);
+        return null;
+      }
+    }
+    return null;
+  };
+
   // Request notification permission
   const requestNotificationPermission = async () => {
     if ('Notification' in window && Notification.permission === 'default') {
       try {
-        await Notification.requestPermission();
+        const permission = await Notification.requestPermission();
+        console.log('Notification permission:', permission);
       } catch (err) {
         console.log('Notification permission denied');
       }
     }
   };
 
-  // Show random Nexus Server notification
-  const showNexusNotification = () => {
+  // Show random Nexus Server notification using Service Worker
+  const showNexusNotification = async () => {
     if ('Notification' in window && Notification.permission === 'granted') {
       const randomMessage = NEXUS_NOTIFICATIONS[Math.floor(Math.random() * NEXUS_NOTIFICATIONS.length)];
-      new Notification('Nexus Server', {
-        body: randomMessage,
-        icon: '/logo192.png',
-        badge: '/logo192.png',
-        tag: 'nexus-server',
-        requireInteraction: false
+
+      // Try to use Service Worker for notification (works even in background)
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'SHOW_NOTIFICATION',
+          title: 'Nexus Server',
+          body: randomMessage,
+          icon: '/logo192.png'
+        });
+      } else {
+        // Fallback to regular notification
+        new Notification('Nexus Server', {
+          body: randomMessage,
+          icon: '/logo192.png',
+          badge: '/logo192.png',
+          tag: 'nexus-server',
+          requireInteraction: false,
+          vibrate: [200, 100, 200]
+        });
+      }
+    }
+  };
+
+  // Keep app alive on iOS using silent audio trick
+  const startBackgroundAudio = () => {
+    try {
+      if (!audioRef.current) {
+        // Create silent audio element
+        const audio = new Audio();
+        // Silent audio data URL (1 second of silence)
+        audio.src = 'data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADhAC7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7u7//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAA4RS5jQ2AAAAAAAA//sQZAAP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAETEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//sQZCQP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAEVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV//sQZDgP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAEVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV';
+        audio.loop = true;
+        audio.volume = 0.01; // Very low volume
+        audioRef.current = audio;
+      }
+
+      // Play silent audio to keep app alive
+      audioRef.current.play().catch(err => {
+        console.log('Silent audio playback blocked:', err);
       });
+    } catch (err) {
+      console.log('Failed to start background audio:', err);
     }
   };
 
@@ -207,14 +264,22 @@ function App() {
     return randomResponses[Math.floor(Math.random() * randomResponses.length)];
   };
 
+  // Register Service Worker and request notifications on mount
   useEffect(() => {
-    if (mode === 'REAL') socket.emit('request_status');
-  }, [mode]);
-
-  // Request notification permission on mount
-  useEffect(() => {
-    requestNotificationPermission();
+    const initializeApp = async () => {
+      await registerServiceWorker();
+      await requestNotificationPermission();
+    };
+    initializeApp();
   }, []);
+
+  useEffect(() => {
+    if (mode === 'REAL') {
+      socket.emit('request_status');
+      // Start background audio to keep app alive on iOS
+      startBackgroundAudio();
+    }
+  }, [mode]);
 
   useEffect(() => {
     const interval = setInterval(handleManualSync, 1000 * 60 * 5);
@@ -866,6 +931,13 @@ function App() {
           </div>
         </>
       )}
+
+      {/* Hidden audio element for iOS background keep-alive */}
+      <audio
+        ref={audioRef}
+        loop
+        style={{ display: 'none' }}
+      />
     </div>
   );
 }

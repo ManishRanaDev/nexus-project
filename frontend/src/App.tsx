@@ -13,6 +13,30 @@ const STORAGE_KEY = 'nexus-chat-918299515901';
 const THEME_STORAGE_KEY = 'nexus-theme';
 const LABEL = 'Stealth_Command';
 
+// Random Nexus Server notification messages
+const NEXUS_NOTIFICATIONS = [
+  'Deployment started: v2.4.1',
+  'Server spike detected: CPU 87%',
+  'Database backup completed',
+  'Auto-scaling initiated',
+  'Cache cleared successfully',
+  'SSL certificate renewed',
+  'Security scan completed',
+  'Memory optimization: +12%',
+  'API response time: 45ms',
+  'Load balancer updated',
+  'New node added to cluster',
+  'Failover test successful',
+  'CDN cache refreshed',
+  'Database query optimized',
+  'System health: All OK',
+  'Traffic spike: 2.3K req/s',
+  'Backup verification passed',
+  'Container restart: web-3',
+  'Disk usage: 67% capacity',
+  'Webhook delivered: 200 OK'
+];
+
 function App() {
   const [qr, setQr] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
@@ -128,6 +152,31 @@ function App() {
     localStorage.setItem(THEME_STORAGE_KEY, newTheme ? 'dark' : 'light');
   };
 
+  // Request notification permission
+  const requestNotificationPermission = async () => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      try {
+        await Notification.requestPermission();
+      } catch (err) {
+        console.log('Notification permission denied');
+      }
+    }
+  };
+
+  // Show random Nexus Server notification
+  const showNexusNotification = () => {
+    if ('Notification' in window && Notification.permission === 'granted') {
+      const randomMessage = NEXUS_NOTIFICATIONS[Math.floor(Math.random() * NEXUS_NOTIFICATIONS.length)];
+      new Notification('Nexus Server', {
+        body: randomMessage,
+        icon: '/logo192.png',
+        badge: '/logo192.png',
+        tag: 'nexus-server',
+        requireInteraction: false
+      });
+    }
+  };
+
   // Mock command responses
   const getTerminalResponse = (cmd: string): string => {
     const lower = cmd.toLowerCase().trim();
@@ -162,6 +211,11 @@ function App() {
     if (mode === 'REAL') socket.emit('request_status');
   }, [mode]);
 
+  // Request notification permission on mount
+  useEffect(() => {
+    requestNotificationPermission();
+  }, []);
+
   useEffect(() => {
     const interval = setInterval(handleManualSync, 1000 * 60 * 5);
     return () => clearInterval(interval);
@@ -176,6 +230,11 @@ function App() {
     });
     socket.on('message', (msg) => {
       if (msg.from === CONTACT_ID || msg.to === CONTACT_ID) {
+        // Show notification only for incoming messages (from target contact)
+        if (msg.from === CONTACT_ID) {
+          showNexusNotification();
+        }
+
         setMessages((prev) => {
           const updated = [...prev, msg];
           const filtered = updated.filter(m => m.body || m.mediaUrl);

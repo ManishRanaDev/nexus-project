@@ -4,44 +4,28 @@
     "slug": "nexus-server",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/icon.png",
     "userInterfaceStyle": "automatic",
     "splash": {
-      "image": "./assets/splash.png",
       "resizeMode": "contain",
       "backgroundColor": "#667eea"
     },
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.nexusserver.app",
+      "bundleIdentifier": "com.nexusserver.app.manish",
       "infoPlist": {
         "UIBackgroundModes": ["remote-notification"]
       }
     },
     "android": {
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#667eea"
-      },
-      "package": "com.nexusserver.app",
+      "package": "com.nexusserver.app.manish",
       "permissions": [
         "RECEIVE_BOOT_COMPLETED",
         "VIBRATE",
         "WAKE_LOCK"
       ]
     },
-    "notification": {
-      "icon": "./assets/notification-icon.png",
-      "color": "#667eea"
-    },
     "plugins": [
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/notification-icon.png",
-          "color": "#667eea"
-        }
-      ]
+      "expo-notifications"
     ]
   }
 }

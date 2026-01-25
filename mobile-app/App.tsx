@@ -17,7 +17,6 @@ import * as Device from 'expo-device';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import io from 'socket.io-client';
 import QRCode from 'react-native-qrcode-svg';
-import * as DocumentPicker from 'expo-document-picker';
 
 const socket = io('https://nexubacksend.shop', {
   transports: ['websocket'],

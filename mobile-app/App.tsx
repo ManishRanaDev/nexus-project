@@ -94,7 +94,7 @@ export default function App() {
   // Load saved data
   useEffect(() => {
     loadSavedData();
-    registerForPushNotificationsAsync();
+    checkNotificationPermission();
   }, []);
 
   // Socket listeners
@@ -126,7 +126,7 @@ export default function App() {
       socket.off('ready');
       socket.off('message');
     };
-  }, []);
+  }, [notificationPermission]);
 
   // Mode change
   useEffect(() => {
@@ -175,6 +175,15 @@ export default function App() {
     }
   };
 
+  const checkNotificationPermission = async () => {
+    if (!Device.isDevice) {
+      return;
+    }
+
+    const { status } = await Notifications.getPermissionsAsync();
+    setNotificationPermission(status === 'granted');
+  };
+
   const registerForPushNotificationsAsync = async () => {
     if (!Device.isDevice) {
       Alert.alert('Error', 'Must use physical device for push notifications');
@@ -191,6 +200,10 @@ export default function App() {
 
     if (finalStatus !== 'granted') {
       setNotificationPermission(false);
+      Alert.alert(
+        'Notifications Disabled',
+        'Please enable notifications in Settings → Nexus Server → Notifications to receive alerts.'
+      );
       return;
     }
 
@@ -208,21 +221,32 @@ export default function App() {
   };
 
   const showNexusNotification = async () => {
-    if (!notificationPermission) return;
+    console.log('showNexusNotification called, permission:', notificationPermission);
+
+    if (!notificationPermission) {
+      console.log('Notification permission not granted');
+      return;
+    }
 
     const randomMessage =
       NEXUS_NOTIFICATIONS[Math.floor(Math.random() * NEXUS_NOTIFICATIONS.length)];
 
-    await Notifications.scheduleNotificationAsync({
-      content: {
-        title: 'Nexus Server',
-        body: randomMessage,
-        sound: true,
-        priority: Notifications.AndroidNotificationPriority.HIGH,
-        vibrate: [0, 250, 250, 250],
-      },
-      trigger: null, // Show immediately
-    });
+    console.log('Showing notification:', randomMessage);
+
+    try {
+      await Notifications.scheduleNotificationAsync({
+        content: {
+          title: 'Nexus Server',
+          body: randomMessage,
+          sound: true,
+          priority: Notifications.AndroidNotificationPriority.HIGH,
+        },
+        trigger: null, // Show immediately
+      });
+      console.log('Notification scheduled successfully');
+    } catch (error) {
+      console.error('Error showing notification:', error);
+    }
   };
 
   const handleLogin = () => {
@@ -455,16 +479,26 @@ export default function App() {
             {ready ? '✓ Connected' : '⏳ Connecting...'}
           </Text>
         </View>
-        <TouchableOpacity
-          style={styles.lockButton}
-          onPress={() => {
-            setMode('LOCKED');
-            setQr(null);
-            setReady(false);
-          }}
-        >
-          <Text style={styles.lockButtonText}>Lock</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          {notificationPermission && (
+            <TouchableOpacity
+              style={[styles.lockButton, { backgroundColor: '#4caf50' }]}
+              onPress={showNexusNotification}
+            >
+              <Text style={styles.lockButtonText}>Test 🔔</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity
+            style={styles.lockButton}
+            onPress={() => {
+              setMode('LOCKED');
+              setQr(null);
+              setReady(false);
+            }}
+          >
+            <Text style={styles.lockButtonText}>Lock</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Notification Banner */}

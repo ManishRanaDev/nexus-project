@@ -100,7 +100,13 @@ export default function App() {
   // Socket listeners
   useEffect(() => {
     socket.on('qr', setQr);
-    socket.on('ready', () => setReady(true));
+    socket.on('ready', () => {
+      setReady(true);
+      // Re-send push token when backend is ready
+      if (notificationPermission) {
+        registerForPushNotificationsAsync();
+      }
+    });
     socket.on('disconnected', (reason) => {
       setReady(false);
       Alert.alert('Disconnected', 'WhatsApp disconnected: ' + reason);
@@ -121,10 +127,19 @@ export default function App() {
       }
     });
 
+    // Send push token when socket connects
+    socket.on('connect', () => {
+      console.log('Socket connected!');
+      if (notificationPermission) {
+        registerForPushNotificationsAsync();
+      }
+    });
+
     return () => {
       socket.off('qr');
       socket.off('ready');
       socket.off('message');
+      socket.off('connect');
     };
   }, [notificationPermission]);
 

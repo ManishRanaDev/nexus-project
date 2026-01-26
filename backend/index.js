@@ -466,7 +466,12 @@ app.get('/debug-info', (req, res) => {
     cacheSize: messageCache.length,
     connectedClients: connectedClients.size,
     consecutiveErrors,
-    isReconnecting
+    isReconnecting,
+    pushTokensRegistered: pushTokens.size,
+    pushTokens: Array.from(pushTokens.entries()).map(([id, token]) => ({
+      socketId: id,
+      tokenPreview: token.substring(0, 30) + '...'
+    }))
   });
 });
 
@@ -502,11 +507,24 @@ io.on('connection', (socket) => {
     console.log(`🔌 Client disconnected [${socket.id}] - Total: ${connectedClients.size}`);
   });
 
-  socket.on('register_push_token', ({ token }) => {
+  socket.on('register_push_token', ({ token }, callback) => {
     if (token) {
       pushTokens.set(socket.id, token);
       console.log(`🔔 Push token registered for [${socket.id}] - Total tokens: ${pushTokens.size}`);
-      console.log(`   Token: ${token.substring(0, 20)}...`);
+      console.log(`   Token: ${token.substring(0, 30)}...`);
+
+      // Send confirmation to client
+      socket.emit('token_registered', { success: true, totalTokens: pushTokens.size });
+
+      // Send acknowledgment if callback provided
+      if (callback && typeof callback === 'function') {
+        callback({ success: true, message: 'Token registered successfully' });
+      }
+    } else {
+      console.log('❌ No token provided');
+      if (callback && typeof callback === 'function') {
+        callback({ success: false, message: 'No token provided' });
+      }
     }
   });
 

@@ -74,6 +74,8 @@ export default function App() {
   const [newMessage, setNewMessage] = useState('');
   const [isDarkMode, setIsDarkMode] = useState(false);
   const [notificationPermission, setNotificationPermission] = useState(false);
+  const [pushToken, setPushToken] = useState<string | null>(null);
+  const [tokenRegistered, setTokenRegistered] = useState(false);
 
   // Terminal states for FAKE mode
   const [terminalMessages, setTerminalMessages] = useState<
@@ -102,13 +104,16 @@ export default function App() {
     socket.on('qr', setQr);
     socket.on('ready', () => {
       setReady(true);
+      console.log('✅ WhatsApp backend ready');
       // Re-send push token when backend is ready
-      if (notificationPermission) {
-        registerForPushNotificationsAsync();
+      if (pushToken) {
+        console.log('📤 Re-sending token on backend ready');
+        sendTokenToBackend(pushToken);
       }
     });
     socket.on('disconnected', (reason) => {
       setReady(false);
+      setTokenRegistered(false);
       Alert.alert('Disconnected', 'WhatsApp disconnected: ' + reason);
     });
     socket.on('message', (msg) => {
@@ -128,11 +133,25 @@ export default function App() {
     });
 
     // Send push token when socket connects
-    socket.on('connect', () => {
-      console.log('Socket connected!');
-      if (notificationPermission) {
+    socket.on('connect', async () => {
+      console.log('🔌 Socket connected!');
+      setTokenRegistered(false);
+
+      // Load saved token
+      const savedToken = await AsyncStorage.getItem('expo_push_token');
+      if (savedToken) {
+        console.log('📤 Sending saved token on connect');
+        setPushToken(savedToken);
+        sendTokenToBackend(savedToken);
+      } else if (notificationPermission) {
+        console.log('📤 No saved token, registering...');
         registerForPushNotificationsAsync();
       }
+    });
+
+    socket.on('token_registered', () => {
+      console.log('✅ Backend confirmed token registration!');
+      setTokenRegistered(true);
     });
 
     return () => {
@@ -140,8 +159,9 @@ export default function App() {
       socket.off('ready');
       socket.off('message');
       socket.off('connect');
+      socket.off('token_registered');
     };
-  }, [notificationPermission]);
+  }, [notificationPermission, pushToken]);
 
   // Mode change
   useEffect(() => {
@@ -204,52 +224,79 @@ export default function App() {
     }
   };
 
+  const sendTokenToBackend = (token: string) => {
+    if (!socket.connected) {
+      console.log('Socket not connected, will retry when connected');
+      return false;
+    }
+
+    console.log('📤 Sending token to backend:', token.substring(0, 30) + '...');
+    socket.emit('register_push_token', { token }, (ack: any) => {
+      console.log('✅ Backend acknowledged token registration:', ack);
+      setTokenRegistered(true);
+    });
+    return true;
+  };
+
   const registerForPushNotificationsAsync = async () => {
     if (!Device.isDevice) {
-      Alert.alert('Error', 'Must use physical device for push notifications');
+      console.log('Not a physical device');
       return;
     }
 
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
-    let finalStatus = existingStatus;
-
-    if (existingStatus !== 'granted') {
-      const { status } = await Notifications.requestPermissionsAsync();
-      finalStatus = status;
-    }
-
-    if (finalStatus !== 'granted') {
-      setNotificationPermission(false);
-      Alert.alert(
-        'Notifications Disabled',
-        'Please enable notifications in Settings → Nexus Server → Notifications to receive alerts.'
-      );
-      return;
-    }
-
-    setNotificationPermission(true);
-
-    // Get Expo push token
     try {
-      const token = (await Notifications.getExpoPushTokenAsync({
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+
+      if (finalStatus !== 'granted') {
+        setNotificationPermission(false);
+        console.log('❌ Notification permission denied');
+        Alert.alert(
+          'Notifications Disabled',
+          'Please enable notifications in Settings → Nexus Server → Notifications to receive alerts.'
+        );
+        return;
+      }
+
+      setNotificationPermission(true);
+      console.log('✅ Notification permission granted');
+
+      // Get Expo push token
+      console.log('🔑 Getting Expo push token...');
+      const tokenData = await Notifications.getExpoPushTokenAsync({
         projectId: '9357d6e1-d08e-4007-a6f2-b430ec4ca31e'
-      })).data;
-      console.log('Expo Push Token:', token);
-
-      // Send token to backend
-      socket.emit('register_push_token', { token });
-    } catch (error) {
-      console.error('Error getting push token:', error);
-    }
-
-    // Configure notification channel for Android
-    if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('default', {
-        name: 'default',
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        lightColor: '#667eea',
       });
+
+      const token = tokenData.data;
+      console.log('✅ Got Expo Push Token:', token);
+      setPushToken(token);
+
+      // Save token locally
+      await AsyncStorage.setItem('expo_push_token', token);
+
+      // Send to backend
+      const sent = sendTokenToBackend(token);
+      if (!sent) {
+        console.log('⏳ Will send token when socket connects');
+      }
+
+      // Configure notification channel for Android
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'default',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#667eea',
+        });
+      }
+    } catch (error) {
+      console.error('❌ Error in registerForPushNotificationsAsync:', error);
+      Alert.alert('Error', 'Failed to register for push notifications: ' + error);
     }
   };
 
@@ -511,9 +558,22 @@ export default function App() {
           <Text style={[styles.status, { color: ready ? '#4caf50' : '#ff9800' }]}>
             {ready ? '✓ Connected' : '⏳ Connecting...'}
           </Text>
+          {notificationPermission && (
+            <Text style={[styles.status, { color: tokenRegistered ? '#4caf50' : '#ff9800', fontSize: 10 }]}>
+              {tokenRegistered ? '🔔 Push: ON' : '⏳ Push: Registering...'}
+            </Text>
+          )}
         </View>
         <View style={{ flexDirection: 'row', gap: 8 }}>
-          {notificationPermission && (
+          {notificationPermission && !tokenRegistered && (
+            <TouchableOpacity
+              style={[styles.lockButton, { backgroundColor: '#2196F3' }]}
+              onPress={registerForPushNotificationsAsync}
+            >
+              <Text style={styles.lockButtonText}>🔄</Text>
+            </TouchableOpacity>
+          )}
+          {notificationPermission && tokenRegistered && (
             <TouchableOpacity
               style={[styles.lockButton, { backgroundColor: '#4caf50' }]}
               onPress={showNexusNotification}

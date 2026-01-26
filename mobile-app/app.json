@@ -14,6 +14,9 @@
       "bundleIdentifier": "com.nexusserver.app.manish",
       "infoPlist": {
         "UIBackgroundModes": ["remote-notification"]
+      },
+      "entitlements": {
+        "aps-environment": "production"
       }
     },
     "android": {
@@ -25,7 +28,12 @@
       ]
     },
     "plugins": [
-      "expo-notifications"
+      [
+        "expo-notifications",
+        {
+          "color": "#667eea"
+        }
+      ]
     ]
   }
 }

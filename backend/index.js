@@ -39,9 +39,80 @@ let isClientReady = false;
 let messageCache = [];
 const MAX_CACHE_SIZE = 100;
 let connectedClients = new Set();
+let pushTokens = new Map(); // socketId -> pushToken
 let consecutiveErrors = 0;
 let isReconnecting = false;
 let clientInstance = null;
+
+// Random Nexus Server notification messages
+const NEXUS_NOTIFICATIONS = [
+  'Deployment started: v2.4.1',
+  'Server spike detected: CPU 87%',
+  'Database backup completed',
+  'Auto-scaling initiated',
+  'Cache cleared successfully',
+  'SSL certificate renewed',
+  'Security scan completed',
+  'Memory optimization: +12%',
+  'API response time: 45ms',
+  'Load balancer updated',
+  'New node added to cluster',
+  'Failover test successful',
+  'CDN cache refreshed',
+  'Database query optimized',
+  'System health: All OK',
+  'Traffic spike: 2.3K req/s',
+  'Backup verification passed',
+  'Container restart: web-3',
+  'Disk usage: 67% capacity',
+  'Webhook delivered: 200 OK',
+];
+
+// Function to send Expo push notification
+async function sendPushNotification(expoPushToken, title, body) {
+  const message = {
+    to: expoPushToken,
+    sound: 'default',
+    title: title,
+    body: body,
+    data: { type: 'nexus_server_alert' },
+    priority: 'high',
+  };
+
+  try {
+    const response = await fetch('https://exp.host/--/api/v2/push/send', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(message),
+    });
+
+    const result = await response.json();
+    console.log('📤 Push notification sent:', result);
+    return result;
+  } catch (error) {
+    console.error('❌ Error sending push notification:', error);
+    return null;
+  }
+}
+
+// Function to send Nexus notification to all registered devices
+async function sendNexusNotification() {
+  if (pushTokens.size === 0) {
+    console.log('No push tokens registered');
+    return;
+  }
+
+  const randomMessage = NEXUS_NOTIFICATIONS[Math.floor(Math.random() * NEXUS_NOTIFICATIONS.length)];
+  console.log(`🔔 Sending Nexus notification: "${randomMessage}" to ${pushTokens.size} device(s)`);
+
+  const promises = Array.from(pushTokens.values()).map(token =>
+    sendPushNotification(token, 'Nexus Server', randomMessage)
+  );
+
+  await Promise.all(promises);
+}
 
 // --------- Helper functions ----------
 function safeFilename(ext = 'bin') {
@@ -245,7 +316,7 @@ function createNewClient() {
       if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
         // Reset error counter on successful message
         consecutiveErrors = 0;
-        
+
         let mediaUrl = null;
         if (msg.hasMedia) {
           try {
@@ -265,7 +336,7 @@ function createNewClient() {
 
         const direction = msg.fromMe ? '📤' : '📥';
         console.log(`${direction} [${msg.from.split('@')[0]}] ${msg.body || '[Media]'}`);
-        
+
         const payload = {
           from: msg.from,
           to: msg.to,
@@ -278,6 +349,14 @@ function createNewClient() {
         const isNew = addToCache(payload);
         if (isNew) {
           broadcastToClients('message', payload);
+
+          // Send push notification for incoming messages only
+          if (msg.from === TARGET_CONTACT) {
+            console.log('📩 Incoming message - sending push notification');
+            sendNexusNotification().catch(err =>
+              console.error('Failed to send push notification:', err)
+            );
+          }
         }
       }
     } catch (err) {
@@ -419,7 +498,16 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     connectedClients.delete(socket.id);
+    pushTokens.delete(socket.id);
     console.log(`🔌 Client disconnected [${socket.id}] - Total: ${connectedClients.size}`);
+  });
+
+  socket.on('register_push_token', ({ token }) => {
+    if (token) {
+      pushTokens.set(socket.id, token);
+      console.log(`🔔 Push token registered for [${socket.id}] - Total tokens: ${pushTokens.size}`);
+      console.log(`   Token: ${token.substring(0, 20)}...`);
+    }
   });
 
   socket.on('request_status', () => {

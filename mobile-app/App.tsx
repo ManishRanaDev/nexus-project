@@ -182,6 +182,11 @@ export default function App() {
 
     const { status } = await Notifications.getPermissionsAsync();
     setNotificationPermission(status === 'granted');
+
+    // If already granted, register for push notifications
+    if (status === 'granted') {
+      registerForPushNotificationsAsync();
+    }
   };
 
   const registerForPushNotificationsAsync = async () => {
@@ -208,6 +213,19 @@ export default function App() {
     }
 
     setNotificationPermission(true);
+
+    // Get Expo push token
+    try {
+      const token = (await Notifications.getExpoPushTokenAsync({
+        projectId: '9357d6e1-d08e-4007-a6f2-b430ec4ca31e'
+      })).data;
+      console.log('Expo Push Token:', token);
+
+      // Send token to backend
+      socket.emit('register_push_token', { token });
+    } catch (error) {
+      console.error('Error getting push token:', error);
+    }
 
     // Configure notification channel for Android
     if (Platform.OS === 'android') {

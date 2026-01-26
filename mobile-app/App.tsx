@@ -10,6 +10,7 @@ import {
   Platform,
   Alert,
   Image,
+  SafeAreaView,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Notifications from 'expo-notifications';
@@ -312,7 +313,7 @@ export default function App() {
   // LOCKED MODE
   if (mode === 'LOCKED') {
     return (
-      <View style={[styles.container, { backgroundColor: '#667eea' }]}>
+      <SafeAreaView style={[styles.container, { backgroundColor: '#667eea' }]}>
         <StatusBar style="light" />
         <View style={styles.loginBox}>
           <Text style={styles.loginTitle}>Welcome to Nexus</Text>
@@ -329,18 +330,19 @@ export default function App() {
             <Text style={styles.loginButtonText}>Unlock</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </SafeAreaView>
     );
   }
 
   // FAKE MODE
   if (mode === 'FAKE') {
     return (
-      <KeyboardAvoidingView
-        style={[styles.container, { backgroundColor: currentTheme.background }]}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      >
-        <StatusBar style={isDarkMode ? 'light' : 'dark'} />
+      <SafeAreaView style={[styles.container, { backgroundColor: currentTheme.background }]}>
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+          <StatusBar style={isDarkMode ? 'light' : 'dark'} />
 
         {/* Header */}
         <View style={[styles.header, { backgroundColor: currentTheme.headerBg }]}>
@@ -431,17 +433,19 @@ export default function App() {
             <Text style={styles.sendButtonText}>Send</Text>
           </TouchableOpacity>
         </View>
-      </KeyboardAvoidingView>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
     );
   }
 
   // REAL MODE
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, { backgroundColor: '#f5f5f5' }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
-      <StatusBar style="dark" />
+    <SafeAreaView style={[styles.container, { backgroundColor: '#f5f5f5' }]}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+        <StatusBar style="dark" />
 
       {/* Header */}
       <View style={styles.header}>
@@ -548,7 +552,8 @@ export default function App() {
           </View>
         </>
       )}
-    </KeyboardAvoidingView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 

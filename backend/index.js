@@ -78,11 +78,10 @@ let messageCache = [];
 const MAX_CACHE_SIZE = 100;
 let connectedClients = new Set();
 
-// Create client with better configuration
+// CRITICAL FIX: Simpler Puppeteer configuration
 const client = new Client({
   authStrategy: new LocalAuth({
-    clientId: 'nexus-client',
-    dataPath: './.wwebjs_auth'
+    clientId: 'nexus-client'
   }),
   puppeteer: {
     headless: true,
@@ -90,18 +89,12 @@ const client = new Client({
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
       '--no-zygote',
-      '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-blink-features=AutomationControlled',
-      '--disable-software-rasterizer',
-      '--disable-extensions'
-    ],
-    timeout: 90000
-  },
-  webVersionCache: {
-    type: 'remote',
-    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
+      '--single-process',
+      '--disable-gpu'
+    ]
   }
 });
 
@@ -259,150 +252,144 @@ client.on('loading_screen', (percent, message) => {
   broadcastToClients('loading', { percent, message });
 });
 
+// CRITICAL FIX: Simplified ready handler
 client.on('ready', async () => {
-  try {
-    isClientReady = true;
-    isInitializing = false;
-    reconnectAttempts = 0;
-    
-    console.log('✅ WhatsApp client is ready!');
-    console.log('📱 Connected as:', client.info.pushname);
-    console.log('📞 Phone:', client.info.wid._serialized);
-    
-    broadcastToClients('ready', { 
-      status: 'connected',
-      info: {
-        pushname: client.info.pushname,
-        phone: client.info.wid._serialized
-      }
-    });
+  console.log('🎉🎉🎉 READY EVENT FIRED 🎉🎉🎉');
+  
+  isClientReady = true;
+  isInitializing = false;
+  reconnectAttempts = 0;
+  latestQR = null;
+  
+  console.log('📱 Connected as:', client.info?.pushname || 'Unknown');
+  console.log('📞 Phone:', client.info?.wid?._serialized || 'Unknown');
+  
+  // Broadcast ready immediately
+  broadcastToClients('ready', { 
+    status: 'connected',
+    info: {
+      pushname: client.info?.pushname || 'User',
+      phone: client.info?.wid?._serialized || 'Unknown'
+    }
+  });
 
-    // Small delay before loading messages
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Load initial messages
+  console.log('✅ Client is now READY and accepting messages!');
+  
+  // Load messages in background (don't wait)
+  setTimeout(async () => {
     try {
       console.log('📥 Loading initial messages...');
-      const targetChat = await client.getChatById(TARGET_CONTACT);
+      const chats = await client.getChats();
+      const targetChat = chats.find(chat => chat.id._serialized === TARGET_CONTACT);
       
       if (targetChat) {
         const messages = await targetChat.fetchMessages({ limit: 50 });
-        console.log(`Found ${messages.length} initial messages`);
+        console.log(`Found ${messages.length} messages`);
 
-        // Process messages in chronological order
         for (const msg of messages.reverse()) {
-          let mediaUrl = null;
-          if (msg.hasMedia) {
-            try {
-              const media = await msg.downloadMedia();
-              if (media && media.data) {
-                const buffer = Buffer.from(media.data, 'base64');
-                const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'bin';
-                const filename = safeFilename(ext);
-                const filepath = path.join(MEDIA_DIR, filename);
-                fs.writeFileSync(filepath, buffer);
-                mediaUrl = `${BASE_URL}/media/${filename}`;
+          try {
+            let mediaUrl = null;
+            
+            if (msg.hasMedia) {
+              try {
+                const media = await msg.downloadMedia();
+                if (media?.data) {
+                  const buffer = Buffer.from(media.data, 'base64');
+                  const ext = media.mimetype?.split('/')[1] || 'bin';
+                  const filename = safeFilename(ext);
+                  fs.writeFileSync(path.join(MEDIA_DIR, filename), buffer);
+                  mediaUrl = `${BASE_URL}/media/${filename}`;
+                }
+              } catch (e) {
+                console.warn('Media download failed:', e.message);
               }
-            } catch (mErr) {
-              console.warn('Media download failed:', mErr.message);
             }
+
+            const payload = {
+              from: msg.from,
+              to: msg.to,
+              body: msg.body || '',
+              timestamp: msg.timestamp,
+              mediaUrl,
+              mimetype: msg._data?.mimetype || null
+            };
+
+            addToCache(payload);
+          } catch (e) {
+            console.warn('Message processing error:', e.message);
           }
-
-          const payload = {
-            from: msg.from,
-            to: msg.to,
-            body: msg.body,
-            timestamp: msg.timestamp,
-            mediaUrl,
-            mimetype: msg._data?.mimetype || null
-          };
-
-          addToCache(payload);
         }
 
         console.log(`✅ Cached ${messageCache.length} messages`);
-
-        // Broadcast to connected clients
-        setTimeout(() => {
-          console.log('📡 Broadcasting initial messages...');
-          messageCache.slice().reverse().forEach(msg => {
-            broadcastToClients('message', msg);
-          });
-        }, 1000);
+        
+        // Broadcast all messages
+        messageCache.slice().reverse().forEach(msg => {
+          broadcastToClients('message', msg);
+        });
       }
     } catch (err) {
-      console.error('Error loading initial messages:', err.message);
+      console.error('Error loading messages:', err.message);
     }
-  } catch (err) {
-    console.error('Error in ready handler:', err.stack);
-  }
+  }, 2000);
 });
 
+// Message handlers
 client.on('message', async (msg) => {
   try {
+    console.log(`📨 Incoming message from ${msg.from}`);
+    
     if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
       let mediaUrl = null;
+      
       if (msg.hasMedia) {
         try {
           const media = await msg.downloadMedia();
-          if (media && media.data) {
+          if (media?.data) {
             const buffer = Buffer.from(media.data, 'base64');
-            const ext = (media.mimetype && media.mimetype.split('/')[1]) || 'bin';
+            const ext = media.mimetype?.split('/')[1] || 'bin';
             const filename = safeFilename(ext);
-            const filepath = path.join(MEDIA_DIR, filename);
-            fs.writeFileSync(filepath, buffer);
+            fs.writeFileSync(path.join(MEDIA_DIR, filename), buffer);
             mediaUrl = `${BASE_URL}/media/${filename}`;
           }
-        } catch (mErr) {
-          console.warn('Failed to download media:', mErr.message);
+        } catch (e) {
+          console.warn('Media download failed:', e.message);
         }
       }
-
-      const direction = msg.fromMe ? '📤' : '📥';
-      console.log(`${direction} [${msg.from}] ${msg.body || '[Media]'}`);
 
       const payload = {
         from: msg.from,
         to: msg.to,
-        body: msg.body,
+        body: msg.body || '',
         timestamp: msg.timestamp,
         mediaUrl,
         mimetype: msg._data?.mimetype || null
       };
 
       const isNew = addToCache(payload);
-
+      
       if (isNew) {
-        console.log(`📡 Broadcasting new message to ${connectedClients.size} clients`);
+        console.log(`📤 Broadcasting message to ${connectedClients.size} clients`);
         broadcastToClients('message', payload);
       }
-    }
-    
-    if (
-      !msg.fromMe &&
-      deviceTokens.size > 0 &&
-      (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT)
-    ) {
-      sendPush(
-        [...deviceTokens],
-        {
-          title: 'Nexus Terminal',
-          body: getStealthNotification(),
-          data: {
-            type: 'incoming_signal',
-            ts: String(msg.timestamp),
+      
+      // Push notification
+      if (!msg.fromMe && deviceTokens.size > 0) {
+        sendPush(
+          [...deviceTokens],
+          {
+            title: 'Nexus Terminal',
+            body: getStealthNotification(),
+            data: { type: 'incoming_signal', ts: String(msg.timestamp) }
           },
-        },
-        (deadToken) => {
-          deviceTokens.delete(deadToken);
-          saveDeviceTokens();
-        }
-      ).catch(err => {
-        console.error('Push failed:', err.message);
-      });
+          (deadToken) => {
+            deviceTokens.delete(deadToken);
+            saveDeviceTokens();
+          }
+        ).catch(err => console.error('Push failed:', err.message));
+      }
     }
   } catch (err) {
-    console.error('Error handling incoming message:', err.stack);
+    console.error('Error in message handler:', err.message);
   }
 });
 
@@ -410,9 +397,9 @@ client.on('message_create', async (msg) => {
   try {
     if (msg.to === TARGET_CONTACT && msg.fromMe) {
       const payload = {
-        from: msg.from || (client.info.wid?._serialized || 'me'),
+        from: client.info?.wid?._serialized || 'me',
         to: msg.to,
-        body: msg.body,
+        body: msg.body || '',
         timestamp: msg.timestamp || Date.now(),
         mediaUrl: null,
         mimetype: null
@@ -420,12 +407,12 @@ client.on('message_create', async (msg) => {
 
       const isNew = addToCache(payload);
       if (isNew) {
-        console.log(`📤 Broadcasting sent message to ${connectedClients.size} clients`);
+        console.log(`📤 Broadcasting sent message`);
         broadcastToClients('message', payload);
       }
     }
   } catch (err) {
-    console.error('Error in message_create handler:', err.message);
+    console.error('Error in message_create:', err.message);
   }
 });
 
@@ -452,7 +439,7 @@ client.on('disconnected', (reason) => {
       }
     }, RECONNECT_DELAY_MS * reconnectAttempts);
   } else {
-    console.error('❌ Max reconnection attempts reached. Please restart manually.');
+    console.error('❌ Max reconnection attempts reached.');
     broadcastToClients('max_reconnect_reached', { message: 'Please restart the server' });
   }
 });
@@ -463,7 +450,7 @@ client.on('change_state', (state) => {
 });
 
 client.on('error', (err) => {
-  console.error('Client error event:', err.stack);
+  console.error('❌ Client error:', err.message);
 });
 
 // --------- Socket.IO ----------
@@ -475,7 +462,7 @@ io.on('connection', (socket) => {
     socket.emit('ready', { status: 'connected' });
 
     if (messageCache.length > 0) {
-      console.log(`📤 Sending ${messageCache.length} cached messages to new client`);
+      console.log(`📤 Sending ${messageCache.length} cached messages`);
       messageCache.slice().reverse().forEach(msg => {
         socket.emit('message', msg);
       });
@@ -503,17 +490,15 @@ io.on('connection', (socket) => {
 
   socket.on('send_message', async ({ message }) => {
     if (!clientIsReady()) {
-      console.error('❌ Send failed: client not ready');
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
 
     try {
-      console.log(`📤 Sending: "${message}" to ${TARGET_CONTACT}`);
-
+      console.log(`📤 Sending message to ${TARGET_CONTACT}`);
       await client.sendMessage(TARGET_CONTACT, message, { sendSeen: false });
 
       const payload = {
-        from: client.info.wid?._serialized || 'me',
+        from: client.info?.wid?._serialized || 'me',
         to: TARGET_CONTACT,
         body: message,
         timestamp: Date.now(),
@@ -522,24 +507,19 @@ io.on('connection', (socket) => {
       };
 
       const isNew = addToCache(payload);
-
       if (isNew) {
-        console.log(`📡 Broadcasting sent message to ${connectedClients.size} clients`);
         broadcastToClients('message', payload);
       }
 
-      console.log(`✅ Message sent successfully`);
       socket.emit('send_result', { ok: true });
-
     } catch (err) {
-      console.error('❌ Send failed:', err.stack);
-      socket.emit('send_result', { ok: false, error: String(err.message) });
+      console.error('Send failed:', err.message);
+      socket.emit('send_result', { ok: false, error: err.message });
     }
   });
 
   socket.on('send_media', async ({ base64, mimetype, filename }) => {
     if (!clientIsReady()) {
-      console.error('❌ Send media failed: client not ready');
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
 
@@ -547,11 +527,11 @@ io.on('connection', (socket) => {
       const base64Body = base64.includes(',') ? base64.split(',')[1] : base64;
       const media = new MessageMedia(mimetype, base64Body, filename);
 
-      console.log(`📤 Sending media: ${filename} to ${TARGET_CONTACT}`);
+      console.log(`📤 Sending media: ${filename}`);
       await client.sendMessage(TARGET_CONTACT, media, { sendSeen: false });
 
       const payload = {
-        from: client.info.wid?._serialized || 'me',
+        from: client.info?.wid?._serialized || 'me',
         to: TARGET_CONTACT,
         body: `[Media: ${filename}]`,
         timestamp: Date.now(),
@@ -564,41 +544,38 @@ io.on('connection', (socket) => {
         broadcastToClients('message', payload);
       }
 
-      console.log(`✅ Media sent successfully`);
       socket.emit('send_result', { ok: true });
-
     } catch (err) {
-      console.error('❌ Send media failed:', err.stack);
-      socket.emit('send_result', { ok: false, error: String(err.message) });
+      console.error('Send media failed:', err.message);
+      socket.emit('send_result', { ok: false, error: err.message });
     }
   });
 });
 
-// --------- Start server & initialize client ----------
+// --------- Start server ----------
 const PORT = parseInt(process.env.PORT || '3001', 10);
 server.listen(PORT, () => {
-  console.log(`🚀 Backend running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📱 Target contact: ${TARGET_CONTACT}`);
 });
 
+// Initialize client
 console.log('🚀 Initializing WhatsApp client...');
 isInitializing = true;
 
 client.initialize()
-  .then(() => {
-    console.log('Client initialization started successfully');
-  })
+  .then(() => console.log('Client initialization started'))
   .catch(err => {
-    console.error('Failed to start client initialization:', err.stack);
+    console.error('Failed to initialize:', err.message);
     isInitializing = false;
   });
 
-// --------- Periodic cleanup ----------
+// --------- Cleanup ----------
 setInterval(() => {
   try {
-    const now = Date.now();
     const files = fs.readdirSync(MEDIA_DIR);
-    let deletedCount = 0;
+    let deleted = 0;
+    const now = Date.now();
 
     files.forEach(file => {
       try {
@@ -607,44 +584,29 @@ setInterval(() => {
         const age = (now - stats.mtimeMs) / (1000 * 60 * 60 * 24);
         if (age > 15) {
           fs.unlinkSync(filePath);
-          deletedCount++;
+          deleted++;
         }
-      } catch (e) {
-        console.warn('Error cleaning file', file, e.message);
-      }
+      } catch (e) {}
     });
 
-    if (deletedCount > 0) {
-      console.log(`🧹 Deleted ${deletedCount} old media files`);
-    }
-  } catch (err) {
-    console.error('Error in media cleanup:', err.message);
-  }
+    if (deleted > 0) console.log(`🧹 Deleted ${deleted} old media files`);
+  } catch (err) {}
 }, 1000 * 60 * 60 * 12);
 
-// --------- Graceful shutdown ----------
+// --------- Shutdown ----------
 async function shutdown(signal) {
-  try {
-    console.log(`Received ${signal}. Shutting down...`);
-    isClientReady = false;
+  console.log(`Received ${signal}. Shutting down...`);
+  isClientReady = false;
+  broadcastToClients('server_shutdown', { reason: signal });
+  
+  try { await client.destroy(); } catch (e) {}
+  
+  server.close(() => {
+    console.log('Server closed.');
+    process.exit(0);
+  });
 
-    broadcastToClients('server_shutdown', { reason: signal });
-
-    try { await client.destroy(); } catch (e) { /* ignore */ }
-
-    server.close(() => {
-      console.log('Server closed.');
-      process.exit(0);
-    });
-
-    setTimeout(() => {
-      console.warn('Forcing shutdown.');
-      process.exit(1);
-    }, 5000);
-  } catch (err) {
-    console.error('Error during shutdown:', err.stack);
-    process.exit(1);
-  }
+  setTimeout(() => process.exit(1), 5000);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT'));

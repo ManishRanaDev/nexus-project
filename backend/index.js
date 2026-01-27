@@ -29,6 +29,10 @@ const STEALTH_MESSAGES = [
   'Process completed successfully'
 ];
 
+let isInitializing = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 3;
+
 function getStealthNotification() {
   return STEALTH_MESSAGES[Math.floor(Math.random() * STEALTH_MESSAGES.length)];
 }
@@ -58,7 +62,6 @@ const io = socketIO(server, {
     origin: '*',
     methods: ['GET', 'POST']
   },
-  // Add ping/pong for keeping connection alive
   pingInterval: 10000,
   pingTimeout: 5000,
 });
@@ -71,13 +74,16 @@ app.use('/media', express.static(MEDIA_DIR));
 let mediaCounter = 0;
 let latestQR = null;
 let isClientReady = false;
-let messageCache = []; // Cache messages in memory
+let messageCache = [];
 const MAX_CACHE_SIZE = 100;
-let connectedClients = new Set(); // Track connected clients
+let connectedClients = new Set();
 
-// Create client with more stable Puppeteer settings
+// Create client with better configuration
 const client = new Client({
-  authStrategy: new LocalAuth(),
+  authStrategy: new LocalAuth({
+    clientId: 'nexus-client',
+    dataPath: './.wwebjs_auth'
+  }),
   puppeteer: {
     headless: true,
     args: [
@@ -87,9 +93,15 @@ const client = new Client({
       '--disable-gpu',
       '--no-zygote',
       '--disable-features=IsolateOrigins,site-per-process',
-      '--disable-blink-features=AutomationControlled'
+      '--disable-blink-features=AutomationControlled',
+      '--disable-software-rasterizer',
+      '--disable-extensions'
     ],
-    timeout: 60000
+    timeout: 90000
+  },
+  webVersionCache: {
+    type: 'remote',
+    remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
   }
 });
 
@@ -104,7 +116,6 @@ function clientIsReady() {
 }
 
 function addToCache(message) {
-  // Check if message already exists (by timestamp and body)
   const exists = messageCache.some(m =>
     m.timestamp === message.timestamp &&
     m.body === message.body &&
@@ -113,7 +124,6 @@ function addToCache(message) {
 
   if (!exists) {
     messageCache.unshift(message);
-    // Keep cache size limited
     if (messageCache.length > MAX_CACHE_SIZE) {
       messageCache = messageCache.slice(0, MAX_CACHE_SIZE);
     }
@@ -153,7 +163,6 @@ app.get('/sync-messages', async (req, res) => {
       success: true
     });
 
-    // Broadcast cached messages to all clients
     messageCache.slice().reverse().forEach(msg => {
       broadcastToClients('message', msg);
     });
@@ -184,7 +193,9 @@ app.get('/debug-info', (req, res) => {
     info: client.info || null,
     latestQR: !!latestQR,
     cacheSize: messageCache.length,
-    connectedClients: connectedClients.size
+    connectedClients: connectedClients.size,
+    reconnectAttempts: reconnectAttempts,
+    isInitializing: isInitializing
   });
 });
 
@@ -231,28 +242,52 @@ client.on('qr', (qr) => {
 });
 
 client.on('authenticated', () => {
-  console.log('✅ Authenticated');
+  console.log('✅ Authentication successful');
+  console.log('⏳ Connecting to WhatsApp...');
   latestQR = null;
+  broadcastToClients('authenticated', { status: 'authenticated' });
 });
 
 client.on('auth_failure', (msg) => {
   console.error('❌ Auth failed:', msg);
+  isInitializing = false;
   broadcastToClients('auth_failure', { error: msg });
+});
+
+client.on('loading_screen', (percent, message) => {
+  console.log(`⏳ Loading: ${percent}% - ${message}`);
+  broadcastToClients('loading', { percent, message });
 });
 
 client.on('ready', async () => {
   try {
     isClientReady = true;
+    isInitializing = false;
+    reconnectAttempts = 0;
+    
     console.log('✅ WhatsApp client is ready!');
-    broadcastToClients('ready', { status: 'connected' });
+    console.log('📱 Connected as:', client.info.pushname);
+    console.log('📞 Phone:', client.info.wid._serialized);
+    
+    broadcastToClients('ready', { 
+      status: 'connected',
+      info: {
+        pushname: client.info.pushname,
+        phone: client.info.wid._serialized
+      }
+    });
+
+    // Small delay before loading messages
+    await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Load initial messages
     try {
       console.log('📥 Loading initial messages...');
       const targetChat = await client.getChatById(TARGET_CONTACT);
+      
       if (targetChat) {
         const messages = await targetChat.fetchMessages({ limit: 50 });
-        console.log(`Loaded ${messages.length} initial messages`);
+        console.log(`Found ${messages.length} initial messages`);
 
         // Process messages in chronological order
         for (const msg of messages.reverse()) {
@@ -287,22 +322,22 @@ client.on('ready', async () => {
 
         console.log(`✅ Cached ${messageCache.length} messages`);
 
-        // Broadcast all cached messages to connected clients
-        console.log('📡 Broadcasting initial messages to all clients...');
-        messageCache.slice().reverse().forEach(msg => {
-          broadcastToClients('message', msg);
-        });
+        // Broadcast to connected clients
+        setTimeout(() => {
+          console.log('📡 Broadcasting initial messages...');
+          messageCache.slice().reverse().forEach(msg => {
+            broadcastToClients('message', msg);
+          });
+        }, 1000);
       }
     } catch (err) {
-      console.warn('Could not load initial messages:', err.message);
-      console.log('Will rely on live message handling');
+      console.error('Error loading initial messages:', err.message);
     }
   } catch (err) {
     console.error('Error in ready handler:', err.stack);
   }
 });
 
-// ✅ CRITICAL: Real-time message handler
 client.on('message', async (msg) => {
   try {
     if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
@@ -335,15 +370,14 @@ client.on('message', async (msg) => {
         mimetype: msg._data?.mimetype || null
       };
 
-      // Add to cache
       const isNew = addToCache(payload);
 
-      // ALWAYS broadcast to ALL connected clients for real-time sync
       if (isNew) {
         console.log(`📡 Broadcasting new message to ${connectedClients.size} clients`);
         broadcastToClients('message', payload);
       }
     }
+    
     if (
       !msg.fromMe &&
       deviceTokens.size > 0 &&
@@ -373,7 +407,6 @@ client.on('message', async (msg) => {
 });
 
 client.on('message_create', async (msg) => {
-  // This event fires for messages we send
   try {
     if (msg.to === TARGET_CONTACT && msg.fromMe) {
       const payload = {
@@ -399,19 +432,29 @@ client.on('message_create', async (msg) => {
 client.on('disconnected', (reason) => {
   console.error('❌ WhatsApp disconnected:', reason);
   isClientReady = false;
+  isInitializing = false;
+  latestQR = null;
+  
   broadcastToClients('disconnected', { reason });
 
-  // Clear cache on disconnect
-  messageCache = [];
-
-  setTimeout(() => {
-    try {
-      console.log(`Attempting to re-initialize after ${RECONNECT_DELAY_MS}ms...`);
-      client.initialize().catch(e => console.error('Re-init failed:', e.stack));
-    } catch (e) {
-      console.error('Error scheduling re-initialize:', e.stack);
-    }
-  }, RECONNECT_DELAY_MS);
+  if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    reconnectAttempts++;
+    console.log(`🔄 Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
+    
+    setTimeout(() => {
+      if (!isInitializing && !isClientReady) {
+        isInitializing = true;
+        console.log('Attempting to re-initialize...');
+        client.initialize().catch(e => {
+          console.error('Re-init failed:', e.message);
+          isInitializing = false;
+        });
+      }
+    }, RECONNECT_DELAY_MS * reconnectAttempts);
+  } else {
+    console.error('❌ Max reconnection attempts reached. Please restart manually.');
+    broadcastToClients('max_reconnect_reached', { message: 'Please restart the server' });
+  }
 });
 
 client.on('change_state', (state) => {
@@ -428,11 +471,9 @@ io.on('connection', (socket) => {
   connectedClients.add(socket.id);
   console.log(`🔌 Client connected [${socket.id}] - Total: ${connectedClients.size}`);
 
-  // Send current status
   if (clientIsReady()) {
     socket.emit('ready', { status: 'connected' });
 
-    // Send all cached messages to newly connected client
     if (messageCache.length > 0) {
       console.log(`📤 Sending ${messageCache.length} cached messages to new client`);
       messageCache.slice().reverse().forEach(msg => {
@@ -471,7 +512,6 @@ io.on('connection', (socket) => {
 
       await client.sendMessage(TARGET_CONTACT, message, { sendSeen: false });
 
-      // Create payload for sent message
       const payload = {
         from: client.info.wid?._serialized || 'me',
         to: TARGET_CONTACT,
@@ -481,10 +521,8 @@ io.on('connection', (socket) => {
         mimetype: null
       };
 
-      // Add to cache
       const isNew = addToCache(payload);
 
-      // Broadcast to all clients immediately
       if (isNew) {
         console.log(`📡 Broadcasting sent message to ${connectedClients.size} clients`);
         broadcastToClients('message', payload);
@@ -543,9 +581,17 @@ server.listen(PORT, () => {
   console.log(`📱 Target contact: ${TARGET_CONTACT}`);
 });
 
-client.initialize().catch(err => {
-  console.error('Failed to initialize WhatsApp client:', err.stack);
-});
+console.log('🚀 Initializing WhatsApp client...');
+isInitializing = true;
+
+client.initialize()
+  .then(() => {
+    console.log('Client initialization started successfully');
+  })
+  .catch(err => {
+    console.error('Failed to start client initialization:', err.stack);
+    isInitializing = false;
+  });
 
 // --------- Periodic cleanup ----------
 setInterval(() => {
@@ -582,7 +628,6 @@ async function shutdown(signal) {
     console.log(`Received ${signal}. Shutting down...`);
     isClientReady = false;
 
-    // Notify all clients
     broadcastToClients('server_shutdown', { reason: signal });
 
     try { await client.destroy(); } catch (e) { /* ignore */ }

@@ -1,13 +1,15 @@
-// ✅ FRONTEND with enhanced terminal commands, random responses, and dark/light mode
-
 import React, { useState, useEffect, ChangeEvent } from 'react';
 import io from 'socket.io-client';
 import { QRCodeCanvas } from 'qrcode.react';
 
 const socket = io('https://nexubacksend.shop', {
   transports: ['websocket'],
-  secure: true
+  secure: true,
+  reconnection: true,
+  reconnectionDelay: 1000,
+  reconnectionAttempts: 5
 });
+
 const CONTACT_ID = '918299515901@c.us';
 const STORAGE_KEY = 'nexus-chat-918299515901';
 const THEME_STORAGE_KEY = 'nexus-theme';
@@ -24,6 +26,8 @@ function App() {
   });
   const [newMessage, setNewMessage] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [connectionStatus, setConnectionStatus] = useState<string>('disconnected');
+  const [loadingPercent, setLoadingPercent] = useState<number>(0);
   
   // Theme state
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -56,7 +60,6 @@ function App() {
     'backup status'
   ];
 
-  // Random responses for unrecognized commands
   const randomResponses = [
     'Processing request...\nOperation completed successfully.\n✓ All systems nominal',
     'Analyzing input...\n[OK] Command executed\nStatus: Operational',
@@ -121,14 +124,12 @@ function App() {
 
   const currentTheme = isDarkMode ? theme.dark : theme.light;
 
-  // Toggle theme and save to localStorage
   const toggleTheme = () => {
     const newTheme = !isDarkMode;
     setIsDarkMode(newTheme);
     localStorage.setItem(THEME_STORAGE_KEY, newTheme ? 'dark' : 'light');
   };
 
-  // Mock command responses
   const getTerminalResponse = (cmd: string): string => {
     const lower = cmd.toLowerCase().trim();
     const responses: {[key: string]: string} = {
@@ -149,12 +150,10 @@ function App() {
 
     if (lower === 'clear') return '__CLEAR__';
     
-    // Check if command exists
     if (responses[lower]) {
       return responses[lower];
     }
     
-    // Return random response for unrecognized commands
     return randomResponses[Math.floor(Math.random() * randomResponses.length)];
   };
 
@@ -168,15 +167,55 @@ function App() {
   }, []);
 
   useEffect(() => {
-    socket.on('qr', setQr);
-    socket.on('ready', () => setReady(true));
-    socket.on('disconnected', (reason) => {
-      setReady(false);
-      alert('WhatsApp disconnected: ' + reason);
+    socket.on('qr', (qrCode) => {
+      console.log('📱 QR Code received');
+      setQr(qrCode);
+      setConnectionStatus('qr_received');
     });
+
+    socket.on('authenticated', () => {
+      console.log('✅ Authenticated');
+      setConnectionStatus('authenticated');
+      setQr(null);
+    });
+
+    socket.on('loading', ({ percent, message }) => {
+      console.log(`⏳ Loading: ${percent}% - ${message}`);
+      setLoadingPercent(percent);
+      setConnectionStatus(`loading: ${message}`);
+    });
+
+    socket.on('ready', (data) => {
+      console.log('✅ Ready:', data);
+      setReady(true);
+      setQr(null);
+      setConnectionStatus('connected');
+      setLoadingPercent(100);
+    });
+
+    socket.on('disconnected', (data) => {
+      console.log('❌ Disconnected:', data);
+      setReady(false);
+      setConnectionStatus(`disconnected: ${data.reason}`);
+    });
+
+    socket.on('max_reconnect_reached', () => {
+      alert('Connection failed. Please restart the backend server.');
+      setConnectionStatus('failed');
+    });
+
     socket.on('message', (msg) => {
+      console.log('📨 Message received:', msg);
       if (msg.from === CONTACT_ID || msg.to === CONTACT_ID) {
         setMessages((prev) => {
+          const exists = prev.some(m => 
+            m.timestamp === msg.timestamp && 
+            m.body === msg.body &&
+            m.from === msg.from
+          );
+          
+          if (exists) return prev;
+          
           const updated = [...prev, msg];
           const filtered = updated.filter(m => m.body || m.mediaUrl);
           localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
@@ -184,9 +223,14 @@ function App() {
         });
       }
     });
+
     return () => {
       socket.off('qr');
+      socket.off('authenticated');
+      socket.off('loading');
       socket.off('ready');
+      socket.off('disconnected');
+      socket.off('max_reconnect_reached');
       socket.off('message');
     };
   }, []);
@@ -380,7 +424,6 @@ function App() {
     );
   }
 
-  // FAKE MODE - Terminal Chat UI with Dark/Light Mode
   if (mode === 'FAKE') {
     return (
       <div style={{ 
@@ -391,7 +434,6 @@ function App() {
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
         transition: 'background 0.3s ease'
       }}>
-        {/* Header */}
         <div style={{
           background: currentTheme.headerBg,
           padding: '16px 24px',
@@ -404,7 +446,6 @@ function App() {
         }}>
           <h3 style={{ margin: 0, color: currentTheme.headerText, fontSize: '18px' }}>Nexus Terminal</h3>
           <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            {/* Theme Toggle Button */}
             <button 
               onClick={toggleTheme}
               style={{
@@ -442,7 +483,6 @@ function App() {
           </div>
         </div>
 
-        {/* Messages Container */}
         <div style={{
           flex: 1,
           overflowY: 'auto',
@@ -505,7 +545,6 @@ function App() {
           ))}
         </div>
 
-        {/* Input Area */}
         <div style={{
           background: currentTheme.inputBg,
           borderTop: `1px solid ${currentTheme.border}`,
@@ -513,7 +552,6 @@ function App() {
           boxShadow: `0 -2px 10px ${currentTheme.shadow}`,
           transition: 'all 0.3s ease'
         }}>
-          {/* Suggestions */}
           <div style={{
             marginBottom: '12px',
             display: 'flex',
@@ -542,7 +580,6 @@ function App() {
             ))}
           </div>
 
-          {/* Input Box */}
           <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
             <input
               type="text"
@@ -598,7 +635,6 @@ function App() {
     );
   }
 
-  // REAL MODE - Same UI as before (unchanged)
   return (
     <div style={{ 
       background: '#f5f5f5', 
@@ -607,7 +643,6 @@ function App() {
       flexDirection: 'column',
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
     }}>
-      {/* Header */}
       <div style={{
         background: 'white',
         padding: '16px 24px',
@@ -620,7 +655,11 @@ function App() {
         <div>
           <h3 style={{ margin: 0, color: '#333', fontSize: '18px' }}>Stealth Chat</h3>
           <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: ready ? '#4caf50' : '#ff9800' }}>
-            {ready ? '✓ Connected' : '⏳ Connecting...'}
+            {ready ? '✓ Connected' : 
+             connectionStatus === 'qr_received' ? '📱 Scan QR Code' : 
+             connectionStatus.startsWith('loading') ? `⏳ ${connectionStatus}` : 
+             connectionStatus === 'authenticated' ? '⏳ Connecting...' : 
+             '⚠️ ' + connectionStatus}
           </p>
         </div>
         <div style={{ display: 'flex', gap: '8px' }}>
@@ -657,7 +696,6 @@ function App() {
         </div>
       </div>
 
-      {/* QR Code Display */}
       {!ready && qr && (
         <div style={{
           display: 'flex',
@@ -677,7 +715,6 @@ function App() {
         </div>
       )}
 
-      {/* Messages Container */}
       {ready && (
         <>
           <div style={{
@@ -726,14 +763,12 @@ function App() {
             })}
           </div>
 
-          {/* Input Area */}
           <div style={{
             background: 'white',
             borderTop: '1px solid #e0e0e0',
             padding: '16px 24px',
             boxShadow: '0 -2px 10px rgba(0,0,0,0.05)'
           }}>
-            {/* File Upload */}
             {selectedFile && (
               <div style={{
                 marginBottom: '12px',
@@ -761,7 +796,6 @@ function App() {
               </div>
             )}
 
-            {/* Input Box */}
             <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
               <label style={{ cursor: 'pointer', padding: '8px', background: '#f0f0f0', borderRadius: '50%' }}>
                 <input

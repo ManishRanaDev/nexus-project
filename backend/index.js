@@ -8,11 +8,46 @@ const socketIO = require('socket.io');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
+const { sendPush } = require('./pushService');
 
 const TARGET_CONTACT = process.env.TARGET_CONTACT || '918299515901@c.us';
 const MEDIA_DIR = path.join(__dirname, 'public');
 const BASE_URL = process.env.PUBLIC_URL || 'http://localhost:3001';
 const RECONNECT_DELAY_MS = parseInt(process.env.RECONNECT_DELAY_MS || '5000', 10);
+
+const TOKENS_FILE = path.join(__dirname, 'deviceTokens.json');
+
+const STEALTH_MESSAGES = [
+  'New event received',
+  'Background task completed',
+  'Secure channel activity',
+  'Input stream updated',
+  'Signal received',
+  'Remote task executed',
+  'System update detected',
+  'New log entry created',
+  'Process completed successfully'
+];
+
+function getStealthNotification() {
+  return STEALTH_MESSAGES[Math.floor(Math.random() * STEALTH_MESSAGES.length)];
+}
+
+function loadDeviceTokens() {
+  try {
+    const raw = fs.readFileSync(TOKENS_FILE, 'utf8');
+    return new Set(JSON.parse(raw));
+  } catch {
+    fs.writeFileSync(TOKENS_FILE, '[]');
+    return new Set();
+  }
+}
+
+function saveDeviceTokens() {
+  fs.writeFileSync(TOKENS_FILE, JSON.stringify([...deviceTokens], null, 2));
+}
+
+const deviceTokens = loadDeviceTokens();
 
 if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
 
@@ -70,12 +105,12 @@ function clientIsReady() {
 
 function addToCache(message) {
   // Check if message already exists (by timestamp and body)
-  const exists = messageCache.some(m => 
-    m.timestamp === message.timestamp && 
+  const exists = messageCache.some(m =>
+    m.timestamp === message.timestamp &&
     m.body === message.body &&
     m.from === message.from
   );
-  
+
   if (!exists) {
     messageCache.unshift(message);
     // Keep cache size limited
@@ -111,9 +146,9 @@ app.get('/sync-messages', async (req, res) => {
 
   try {
     console.log(`📤 Returning ${messageCache.length} cached messages`);
-    
-    res.status(200).json({ 
-      message: 'Messages synced from cache', 
+
+    res.status(200).json({
+      message: 'Messages synced from cache',
       count: messageCache.length,
       success: true
     });
@@ -122,13 +157,13 @@ app.get('/sync-messages', async (req, res) => {
     messageCache.slice().reverse().forEach(msg => {
       broadcastToClients('message', msg);
     });
-    
+
   } catch (err) {
     console.error('❌ Sync failed:', err && err.stack ? err.stack : err);
-    res.status(500).json({ 
-      error: 'Sync failed', 
+    res.status(500).json({
+      error: 'Sync failed',
       detail: String(err && err.message ? err.message : err),
-      success: false 
+      success: false
     });
   }
 });
@@ -157,7 +192,7 @@ app.post('/test-send', async (req, res) => {
   if (!clientIsReady()) {
     return res.status(503).json({ error: 'Client not ready' });
   }
-  
+
   try {
     console.log('Testing send to:', TARGET_CONTACT);
     const result = await client.sendMessage(TARGET_CONTACT, 'Test message from backend', { sendSeen: false });
@@ -166,6 +201,24 @@ app.post('/test-send', async (req, res) => {
     console.error('Test send failed:', err);
     res.status(500).json({ error: err.message, stack: err.stack });
   }
+});
+
+app.post('/register-device', (req, res) => {
+  const { token } = req.body;
+
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ error: 'token_required' });
+  }
+
+  const before = deviceTokens.size;
+  deviceTokens.add(token);
+
+  if (deviceTokens.size !== before) {
+    saveDeviceTokens();
+    console.log('📲 Device token stored:', token.slice(0, 12));
+  }
+
+  res.json({ success: true });
 });
 
 // --------- Client events ----------
@@ -200,7 +253,7 @@ client.on('ready', async () => {
       if (targetChat) {
         const messages = await targetChat.fetchMessages({ limit: 50 });
         console.log(`Loaded ${messages.length} initial messages`);
-        
+
         // Process messages in chronological order
         for (const msg of messages.reverse()) {
           let mediaUrl = null;
@@ -231,9 +284,9 @@ client.on('ready', async () => {
 
           addToCache(payload);
         }
-        
+
         console.log(`✅ Cached ${messageCache.length} messages`);
-        
+
         // Broadcast all cached messages to connected clients
         console.log('📡 Broadcasting initial messages to all clients...');
         messageCache.slice().reverse().forEach(msg => {
@@ -272,7 +325,7 @@ client.on('message', async (msg) => {
 
       const direction = msg.fromMe ? '📤' : '📥';
       console.log(`${direction} [${msg.from}] ${msg.body || '[Media]'}`);
-      
+
       const payload = {
         from: msg.from,
         to: msg.to,
@@ -284,12 +337,35 @@ client.on('message', async (msg) => {
 
       // Add to cache
       const isNew = addToCache(payload);
-      
+
       // ALWAYS broadcast to ALL connected clients for real-time sync
       if (isNew) {
         console.log(`📡 Broadcasting new message to ${connectedClients.size} clients`);
         broadcastToClients('message', payload);
       }
+    }
+    if (
+      !msg.fromMe &&
+      deviceTokens.size > 0 &&
+      (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT)
+    ) {
+      sendPush(
+        [...deviceTokens],
+        {
+          title: 'Nexus Terminal',
+          body: getStealthNotification(),
+          data: {
+            type: 'incoming_signal',
+            ts: String(msg.timestamp),
+          },
+        },
+        (deadToken) => {
+          deviceTokens.delete(deadToken);
+          saveDeviceTokens();
+        }
+      ).catch(err => {
+        console.error('Push failed:', err.message);
+      });
     }
   } catch (err) {
     console.error('Error handling incoming message:', err.stack);
@@ -355,7 +431,7 @@ io.on('connection', (socket) => {
   // Send current status
   if (clientIsReady()) {
     socket.emit('ready', { status: 'connected' });
-    
+
     // Send all cached messages to newly connected client
     if (messageCache.length > 0) {
       console.log(`📤 Sending ${messageCache.length} cached messages to new client`);
@@ -389,12 +465,12 @@ io.on('connection', (socket) => {
       console.error('❌ Send failed: client not ready');
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
-    
+
     try {
       console.log(`📤 Sending: "${message}" to ${TARGET_CONTACT}`);
-      
+
       await client.sendMessage(TARGET_CONTACT, message, { sendSeen: false });
-      
+
       // Create payload for sent message
       const payload = {
         from: client.info.wid?._serialized || 'me',
@@ -404,19 +480,19 @@ io.on('connection', (socket) => {
         mediaUrl: null,
         mimetype: null
       };
-      
+
       // Add to cache
       const isNew = addToCache(payload);
-      
+
       // Broadcast to all clients immediately
       if (isNew) {
         console.log(`📡 Broadcasting sent message to ${connectedClients.size} clients`);
         broadcastToClients('message', payload);
       }
-      
+
       console.log(`✅ Message sent successfully`);
       socket.emit('send_result', { ok: true });
-      
+
     } catch (err) {
       console.error('❌ Send failed:', err.stack);
       socket.emit('send_result', { ok: false, error: String(err.message) });
@@ -428,11 +504,11 @@ io.on('connection', (socket) => {
       console.error('❌ Send media failed: client not ready');
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
-    
+
     try {
       const base64Body = base64.includes(',') ? base64.split(',')[1] : base64;
       const media = new MessageMedia(mimetype, base64Body, filename);
-      
+
       console.log(`📤 Sending media: ${filename} to ${TARGET_CONTACT}`);
       await client.sendMessage(TARGET_CONTACT, media, { sendSeen: false });
 
@@ -444,7 +520,7 @@ io.on('connection', (socket) => {
         mediaUrl: null,
         mimetype
       };
-      
+
       const isNew = addToCache(payload);
       if (isNew) {
         broadcastToClients('message', payload);
@@ -452,7 +528,7 @@ io.on('connection', (socket) => {
 
       console.log(`✅ Media sent successfully`);
       socket.emit('send_result', { ok: true });
-      
+
     } catch (err) {
       console.error('❌ Send media failed:', err.stack);
       socket.emit('send_result', { ok: false, error: String(err.message) });
@@ -477,7 +553,7 @@ setInterval(() => {
     const now = Date.now();
     const files = fs.readdirSync(MEDIA_DIR);
     let deletedCount = 0;
-    
+
     files.forEach(file => {
       try {
         const filePath = path.join(MEDIA_DIR, file);
@@ -491,7 +567,7 @@ setInterval(() => {
         console.warn('Error cleaning file', file, e.message);
       }
     });
-    
+
     if (deletedCount > 0) {
       console.log(`🧹 Deleted ${deletedCount} old media files`);
     }
@@ -505,17 +581,17 @@ async function shutdown(signal) {
   try {
     console.log(`Received ${signal}. Shutting down...`);
     isClientReady = false;
-    
+
     // Notify all clients
     broadcastToClients('server_shutdown', { reason: signal });
-    
+
     try { await client.destroy(); } catch (e) { /* ignore */ }
-    
+
     server.close(() => {
       console.log('Server closed.');
       process.exit(0);
     });
-    
+
     setTimeout(() => {
       console.warn('Forcing shutdown.');
       process.exit(1);

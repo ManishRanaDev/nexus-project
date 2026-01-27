@@ -27,7 +27,6 @@ function App() {
   const [newMessage, setNewMessage] = useState('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [connectionStatus, setConnectionStatus] = useState<string>('disconnected');
-  const [loadingPercent, setLoadingPercent] = useState<number>(0);
   
   // Theme state
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -164,6 +163,7 @@ function App() {
   useEffect(() => {
     const interval = setInterval(handleManualSync, 1000 * 60 * 5);
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -181,7 +181,6 @@ function App() {
 
     socket.on('loading', ({ percent, message }) => {
       console.log(`⏳ Loading: ${percent}% - ${message}`);
-      setLoadingPercent(percent);
       setConnectionStatus(`loading: ${message}`);
     });
 
@@ -190,7 +189,6 @@ function App() {
       setReady(true);
       setQr(null);
       setConnectionStatus('connected');
-      setLoadingPercent(100);
     });
 
     socket.on('disconnected', (data) => {

@@ -1,4 +1,22 @@
 node_modules/
-**/.local-chromium/
-**/.local-chromium/**
-**/.cache/
+dist/
+build/
+.env
+*.log
+
+# Baileys auth state
+backend/auth_info/
+
+# Media files
+backend/public/
+
+# Device tokens (contains FCM tokens)
+backend/deviceTokens.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

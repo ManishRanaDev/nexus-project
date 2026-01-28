@@ -1,0 +1,43 @@
+import type { ThemeColors } from './types';
+
+export const lightTheme: ThemeColors = {
+  background: '#f5f5f5',
+  headerBg: 'white',
+  headerText: '#333',
+  messageBg: 'white',
+  messageText: '#333',
+  userBubble: '#667eea',
+  userBubbleText: 'white',
+  border: '#e0e0e0',
+  inputBg: 'white',
+  inputBorder: '#e0e0e0',
+  suggestionBg: '#f0f0f0',
+  suggestionBorder: '#d0d0d0',
+  suggestionText: '#666',
+  suggestionHover: '#e0e0e0',
+  footerText: '#999',
+  shadow: 'rgba(0,0,0,0.05)',
+  buttonBg: '#667eea',
+  buttonDisabled: '#ccc',
+};
+
+export const darkTheme: ThemeColors = {
+  background: '#000000',
+  headerBg: '#0a0a0a',
+  headerText: '#ffffff',
+  messageBg: '#1a1a1a',
+  messageText: '#e0e0e0',
+  userBubble: '#667eea',
+  userBubbleText: 'white',
+  border: '#2a2a2a',
+  inputBg: '#0a0a0a',
+  inputBorder: '#2a2a2a',
+  suggestionBg: '#1a1a1a',
+  suggestionBorder: '#2a2a2a',
+  suggestionText: '#999',
+  suggestionHover: '#2a2a2a',
+  footerText: '#666',
+  shadow: 'rgba(0,0,0,0.3)',
+  buttonBg: '#667eea',
+  buttonDisabled: '#333',
+};

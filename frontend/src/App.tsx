@@ -7,7 +7,7 @@
  * - Optimistic UI updates
  */
 
-import React, { useState, useEffect, useCallback, useRef, ChangeEvent, KeyboardEvent } from 'react';
+import React, { useState, useEffect, useCallback, useRef, ChangeEvent } from 'react';
 import { io, Socket } from 'socket.io-client';
 import { QRCodeCanvas } from 'qrcode.react';
 

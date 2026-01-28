@@ -1,22 +1,40 @@
-// index.js
+/**
+ * Nexus Terminal Backend v2.0
+ * WhatsApp Integration Server with Socket.IO Real-time Communication
+ */
+
+'use strict';
+
 require('dotenv').config();
+
 const express = require('express');
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const http = require('http');
-const socketIO = require('socket.io');
+const { Server: SocketIOServer } = require('socket.io');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const { sendPush } = require('./pushService');
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
 
-const TARGET_CONTACT = process.env.TARGET_CONTACT || '918299515901@c.us';
-const MEDIA_DIR = path.join(__dirname, 'public');
-const BASE_URL = process.env.PUBLIC_URL || 'http://localhost:3001';
-const RECONNECT_DELAY_MS = parseInt(process.env.RECONNECT_DELAY_MS || '5000', 10);
+// ============================================================================
+// Configuration
+// ============================================================================
 
-const TOKENS_FILE = path.join(__dirname, 'deviceTokens.json');
+const CONFIG = {
+  port: parseInt(process.env.PORT || '3001', 10),
+  targetContact: process.env.TARGET_CONTACT || '918299515901@c.us',
+  baseUrl: process.env.PUBLIC_URL || 'http://localhost:3001',
+  mediaDir: path.join(__dirname, 'public'),
+  tokensFile: path.join(__dirname, 'deviceTokens.json'),
+  maxCacheSize: 100,
+  maxReconnectAttempts: 3,
+  reconnectDelayMs: 5000,
+  mediaRetentionDays: 15,
+  clientStabilizationDelayMs: 8000,
+  messageLoadDelayMs: 3000,
+};
 
+// Stealth notification messages for push notifications
 const STEALTH_MESSAGES = [
   'New event received',
   'Background task completed',
@@ -26,633 +44,978 @@ const STEALTH_MESSAGES = [
   'Remote task executed',
   'System update detected',
   'New log entry created',
-  'Process completed successfully'
+  'Process completed successfully',
 ];
 
-let isInitializing = false;
-let reconnectAttempts = 0;
-const MAX_RECONNECT_ATTEMPTS = 3;
+// ============================================================================
+// Utility Functions
+// ============================================================================
 
-function getStealthNotification() {
+function log(level, message, data = null) {
+  const timestamp = new Date().toISOString();
+  const prefix = { info: 'ℹ️', warn: '⚠️', error: '❌', success: '✅', debug: '🔍' }[level] || '📋';
+  console.log(`[${timestamp}] ${prefix} ${message}`, data ? JSON.stringify(data) : '');
+}
+
+function getRandomStealthMessage() {
   return STEALTH_MESSAGES[Math.floor(Math.random() * STEALTH_MESSAGES.length)];
 }
 
-function loadDeviceTokens() {
-  try {
-    const raw = fs.readFileSync(TOKENS_FILE, 'utf8');
-    return new Set(JSON.parse(raw));
-  } catch {
-    fs.writeFileSync(TOKENS_FILE, '[]');
-    return new Set();
+function generateMediaFilename(extension = 'bin') {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).substring(2, 8);
+  return `media_${timestamp}_${random}.${extension}`;
+}
+
+function ensureDirectoryExists(dirPath) {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+    log('info', `Created directory: ${dirPath}`);
   }
 }
 
-function saveDeviceTokens() {
-  fs.writeFileSync(TOKENS_FILE, JSON.stringify([...deviceTokens], null, 2));
+// ============================================================================
+// Device Token Management
+// ============================================================================
+
+class DeviceTokenManager {
+  constructor(filePath) {
+    this.filePath = filePath;
+    this.tokens = this.load();
+  }
+
+  load() {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        const data = fs.readFileSync(this.filePath, 'utf8');
+        return new Set(JSON.parse(data));
+      }
+    } catch (err) {
+      log('warn', 'Failed to load device tokens', { error: err.message });
+    }
+    return new Set();
+  }
+
+  save() {
+    try {
+      fs.writeFileSync(this.filePath, JSON.stringify([...this.tokens], null, 2));
+    } catch (err) {
+      log('error', 'Failed to save device tokens', { error: err.message });
+    }
+  }
+
+  add(token) {
+    if (!token || typeof token !== 'string') return false;
+    const hadToken = this.tokens.has(token);
+    this.tokens.add(token);
+    if (!hadToken) {
+      this.save();
+      log('info', 'Device token registered', { tokenPrefix: token.slice(0, 12) });
+    }
+    return !hadToken;
+  }
+
+  remove(token) {
+    if (this.tokens.delete(token)) {
+      this.save();
+      log('info', 'Device token removed', { tokenPrefix: token.slice(0, 12) });
+      return true;
+    }
+    return false;
+  }
+
+  getAll() {
+    return [...this.tokens];
+  }
+
+  get size() {
+    return this.tokens.size;
+  }
 }
 
-const deviceTokens = loadDeviceTokens();
+// ============================================================================
+// Message Cache Manager
+// ============================================================================
 
-if (!fs.existsSync(MEDIA_DIR)) fs.mkdirSync(MEDIA_DIR, { recursive: true });
+class MessageCache {
+  constructor(maxSize = 100) {
+    this.messages = [];
+    this.maxSize = maxSize;
+  }
 
-const app = express();
-const server = http.createServer(app);
-const io = socketIO(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  },
-  pingInterval: 10000,
-  pingTimeout: 5000,
-});
+  add(message) {
+    // Check for duplicates
+    const isDuplicate = this.messages.some(
+      (m) =>
+        m.timestamp === message.timestamp &&
+        m.body === message.body &&
+        m.from === message.from
+    );
 
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use('/media', express.static(MEDIA_DIR));
+    if (isDuplicate) return false;
 
-let mediaCounter = 0;
-let latestQR = null;
-let isClientReady = false;
-let messageCache = [];
-const MAX_CACHE_SIZE = 100;
-let connectedClients = new Set();
+    this.messages.unshift(message);
+    if (this.messages.length > this.maxSize) {
+      this.messages = this.messages.slice(0, this.maxSize);
+    }
+    return true;
+  }
 
-// CRITICAL FIX: Simpler Puppeteer configuration
-const client = new Client({
-  authStrategy: new LocalAuth({
-    clientId: 'nexus-client'
-  }),
-  puppeteer: {
-    headless: true,
-    args: [
+  getAll() {
+    return [...this.messages];
+  }
+
+  getReversed() {
+    return [...this.messages].reverse();
+  }
+
+  clear() {
+    this.messages = [];
+  }
+
+  get size() {
+    return this.messages.length;
+  }
+
+  getInfo() {
+    return {
+      size: this.messages.length,
+      maxSize: this.maxSize,
+      oldest: this.messages[this.messages.length - 1]?.timestamp || null,
+      newest: this.messages[0]?.timestamp || null,
+    };
+  }
+}
+
+// ============================================================================
+// Push Notification Service
+// ============================================================================
+
+let pushService = null;
+
+async function initializePushService() {
+  try {
+    const admin = require('firebase-admin');
+
+    if (
+      !process.env.FCM_PROJECT_ID ||
+      !process.env.FCM_CLIENT_EMAIL ||
+      !process.env.FCM_PRIVATE_KEY
+    ) {
+      log('warn', 'Firebase credentials not configured - push notifications disabled');
+      return null;
+    }
+
+    if (!admin.apps.length) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: process.env.FCM_PROJECT_ID,
+          clientEmail: process.env.FCM_CLIENT_EMAIL,
+          privateKey: process.env.FCM_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        }),
+      });
+    }
+
+    log('success', 'Firebase Admin initialized successfully');
+    return admin;
+  } catch (err) {
+    log('error', 'Failed to initialize Firebase', { error: err.message });
+    return null;
+  }
+}
+
+async function sendPushNotification(tokens, payload, onInvalidToken) {
+  if (!pushService || !tokens.length) return;
+
+  try {
+    const response = await pushService.messaging().sendEachForMulticast({
+      tokens,
+      notification: {
+        title: payload.title || 'Nexus Terminal',
+        body: payload.body || getRandomStealthMessage(),
+      },
+      data: payload.data || {},
+      android: {
+        priority: 'high',
+        notification: {
+          sound: 'default',
+          channelId: 'nexus_channel',
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1,
+          },
+        },
+      },
+    });
+
+    let successCount = 0;
+    response.responses.forEach((res, idx) => {
+      if (res.success) {
+        successCount++;
+      } else if (
+        res.error?.code === 'messaging/registration-token-not-registered' ||
+        res.error?.code === 'messaging/invalid-registration-token'
+      ) {
+        if (typeof onInvalidToken === 'function') {
+          onInvalidToken(tokens[idx]);
+        }
+      }
+    });
+
+    log('info', `Push notifications sent: ${successCount}/${tokens.length}`);
+  } catch (err) {
+    log('error', 'Push notification failed', { error: err.message });
+  }
+}
+
+// ============================================================================
+// WhatsApp Client Manager
+// ============================================================================
+
+class WhatsAppManager {
+  constructor(config, messageCache, deviceTokens, broadcastFn) {
+    this.config = config;
+    this.messageCache = messageCache;
+    this.deviceTokens = deviceTokens;
+    this.broadcast = broadcastFn;
+
+    this.client = null;
+    this.isReady = false;
+    this.isInitializing = false;
+    this.latestQR = null;
+    this.reconnectAttempts = 0;
+    this.loadingTimeout = null;
+    this.readyTimeout = null;
+  }
+
+  getPuppeteerConfig() {
+    const args = [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--single-process',
-      '--disable-gpu'
-    ]
+      '--disable-gpu',
+      '--disable-extensions',
+      '--disable-default-apps',
+      '--disable-translate',
+      '--disable-sync',
+      '--hide-scrollbars',
+      '--metrics-recording-only',
+      '--mute-audio',
+      '--no-default-browser-check',
+      '--safebrowsing-disable-auto-update',
+    ];
+
+    // Single process mode for low-memory environments
+    if (process.env.LOW_MEMORY === 'true') {
+      args.push('--single-process');
+    }
+
+    // Find Chrome/Chromium executable
+    const possiblePaths = [
+      process.env.CHROME_PATH,
+      process.env.PUPPETEER_EXECUTABLE_PATH,
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ].filter(Boolean);
+
+    let executablePath = null;
+    for (const p of possiblePaths) {
+      if (p && fs.existsSync(p)) {
+        executablePath = p;
+        log('info', `Using Chrome at: ${p}`);
+        break;
+      }
+    }
+
+    const config = {
+      headless: true,
+      args,
+      defaultViewport: null,
+      timeout: 60000,
+    };
+
+    if (executablePath) {
+      config.executablePath = executablePath;
+    }
+
+    return config;
   }
+
+  createClient() {
+    this.client = new Client({
+      authStrategy: new LocalAuth({
+        clientId: 'nexus-client',
+        dataPath: path.join(__dirname, '.wwebjs_auth'),
+      }),
+      puppeteer: this.getPuppeteerConfig(),
+      webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/AhmadBilal-WebDev/pptr_wawebcache/main/webVersionCache.json',
+      },
+    });
+
+    this.setupEventHandlers();
+    return this.client;
+  }
+
+  setupEventHandlers() {
+    // QR Code Event
+    this.client.on('qr', (qr) => {
+      this.latestQR = qr;
+      this.isReady = false;
+      log('info', 'QR Code received');
+      qrcode.generate(qr, { small: true });
+      this.broadcast('qr', qr);
+    });
+
+    // Authentication Success
+    this.client.on('authenticated', () => {
+      log('success', 'Authentication successful');
+      this.latestQR = null;
+      this.broadcast('authenticated', { status: 'authenticated' });
+
+      // Fallback: Force ready if stuck after authentication
+      this.readyTimeout = setTimeout(() => {
+        if (!this.isReady && this.client?.info) {
+          log('warn', 'Forcing ready event after authentication timeout');
+          this.handleReady();
+        }
+      }, 20000);
+    });
+
+    // Authentication Failure
+    this.client.on('auth_failure', (msg) => {
+      log('error', 'Authentication failed', { message: msg });
+      this.isInitializing = false;
+      this.broadcast('auth_failure', { error: msg });
+    });
+
+    // Loading Screen
+    this.client.on('loading_screen', (percent, message) => {
+      log('debug', `Loading: ${percent}% - ${message}`);
+      this.broadcast('loading', { percent, message });
+
+      // If stuck at 100%, force ready
+      if (percent === 100 && !this.isReady) {
+        clearTimeout(this.loadingTimeout);
+        this.loadingTimeout = setTimeout(() => {
+          if (!this.isReady && this.client?.info) {
+            log('warn', 'Forcing ready event (stuck at 100%)');
+            this.handleReady();
+          }
+        }, 5000);
+      }
+    });
+
+    // Ready Event
+    this.client.on('ready', () => {
+      clearTimeout(this.readyTimeout);
+      clearTimeout(this.loadingTimeout);
+      this.handleReady();
+    });
+
+    // Incoming Messages
+    this.client.on('message', async (msg) => {
+      await this.handleIncomingMessage(msg);
+    });
+
+    // Sent Messages
+    this.client.on('message_create', async (msg) => {
+      await this.handleSentMessage(msg);
+    });
+
+    // Disconnection
+    this.client.on('disconnected', (reason) => {
+      log('error', 'WhatsApp disconnected', { reason });
+      this.isReady = false;
+      this.isInitializing = false;
+      this.latestQR = null;
+      this.broadcast('disconnected', { reason });
+      this.attemptReconnect();
+    });
+
+    // State Changes
+    this.client.on('change_state', (state) => {
+      log('debug', 'State changed', { state });
+      this.broadcast('state_change', { state });
+    });
+
+    // Errors
+    this.client.on('error', (err) => {
+      log('error', 'Client error', { error: err.message });
+    });
+  }
+
+  async handleReady() {
+    if (this.isReady) return; // Prevent duplicate handling
+
+    log('success', '🎉 WhatsApp Client Ready!');
+    this.isReady = true;
+    this.isInitializing = false;
+    this.reconnectAttempts = 0;
+    this.latestQR = null;
+
+    const clientInfo = {
+      pushname: this.client.info?.pushname || 'User',
+      phone: this.client.info?.wid?._serialized || 'Unknown',
+    };
+
+    log('info', 'Connected as', clientInfo);
+    this.broadcast('ready', { status: 'connected', info: clientInfo });
+
+    // Load message history after stabilization
+    setTimeout(() => this.loadMessageHistory(), this.config.clientStabilizationDelayMs);
+  }
+
+  async loadMessageHistory() {
+    try {
+      log('info', 'Loading message history...');
+
+      // Wait for client to fully stabilize
+      await new Promise((resolve) => setTimeout(resolve, this.config.messageLoadDelayMs));
+
+      if (!this.isReady) {
+        log('warn', 'Client not ready, skipping message history load');
+        return;
+      }
+
+      const chats = await this.client.getChats();
+      log('info', `Found ${chats.length} chats`);
+
+      const targetChat = chats.find(
+        (chat) => chat.id._serialized === this.config.targetContact
+      );
+
+      if (!targetChat) {
+        log('info', 'Target chat not found - will populate as messages arrive');
+        return;
+      }
+
+      log('info', 'Target chat found, loading messages...');
+
+      const messages = await targetChat.fetchMessages({ limit: 30 });
+      log('info', `Loaded ${messages.length} messages from history`);
+
+      for (const msg of messages.reverse()) {
+        try {
+          const payload = await this.createMessagePayload(msg);
+          if (payload && this.messageCache.add(payload)) {
+            this.broadcast('message', payload);
+          }
+        } catch (err) {
+          log('warn', 'Failed to process historical message', { error: err.message });
+        }
+      }
+
+      log('success', `Message cache populated with ${this.messageCache.size} messages`);
+    } catch (err) {
+      log('error', 'Failed to load message history', { error: err.message });
+      log('info', 'Real-time messaging will still work');
+    }
+  }
+
+  async createMessagePayload(msg) {
+    let mediaUrl = null;
+    let mimetype = msg._data?.mimetype || null;
+
+    if (msg.hasMedia) {
+      try {
+        const media = await msg.downloadMedia();
+        if (media?.data) {
+          const buffer = Buffer.from(media.data, 'base64');
+          const ext = media.mimetype?.split('/')[1]?.split(';')[0] || 'bin';
+          const filename = generateMediaFilename(ext);
+          const filePath = path.join(this.config.mediaDir, filename);
+          fs.writeFileSync(filePath, buffer);
+          mediaUrl = `${this.config.baseUrl}/media/${filename}`;
+          mimetype = media.mimetype;
+        }
+      } catch (err) {
+        log('warn', 'Media download failed', { error: err.message });
+      }
+    }
+
+    return {
+      from: msg.from,
+      to: msg.to,
+      body: msg.body || '',
+      timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
+      mediaUrl,
+      mimetype,
+    };
+  }
+
+  async handleIncomingMessage(msg) {
+    try {
+      const isTargetConversation =
+        msg.from === this.config.targetContact || msg.to === this.config.targetContact;
+
+      if (!isTargetConversation) return;
+
+      log('info', 'Incoming message', { from: msg.from });
+
+      const payload = await this.createMessagePayload(msg);
+      if (!payload) return;
+
+      const isNew = this.messageCache.add(payload);
+
+      if (isNew) {
+        this.broadcast('message', payload);
+
+        // Send push notification for incoming messages
+        if (!msg.fromMe && this.deviceTokens.size > 0) {
+          sendPushNotification(
+            this.deviceTokens.getAll(),
+            {
+              title: 'Nexus Terminal',
+              body: getRandomStealthMessage(),
+              data: { type: 'incoming_signal', ts: String(msg.timestamp) },
+            },
+            (deadToken) => this.deviceTokens.remove(deadToken)
+          );
+        }
+      }
+    } catch (err) {
+      log('error', 'Error handling incoming message', { error: err.message });
+    }
+  }
+
+  async handleSentMessage(msg) {
+    try {
+      if (msg.to !== this.config.targetContact || !msg.fromMe) return;
+
+      const payload = {
+        from: this.client.info?.wid?._serialized || 'me',
+        to: msg.to,
+        body: msg.body || '',
+        timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
+        mediaUrl: null,
+        mimetype: null,
+      };
+
+      if (this.messageCache.add(payload)) {
+        log('info', 'Sent message captured');
+        this.broadcast('message', payload);
+      }
+    } catch (err) {
+      log('error', 'Error handling sent message', { error: err.message });
+    }
+  }
+
+  async sendMessage(text) {
+    if (!this.isReady) {
+      throw new Error('Client not ready');
+    }
+
+    await this.client.sendMessage(this.config.targetContact, text, { sendSeen: false });
+
+    const payload = {
+      from: this.client.info?.wid?._serialized || 'me',
+      to: this.config.targetContact,
+      body: text,
+      timestamp: Math.floor(Date.now() / 1000),
+      mediaUrl: null,
+      mimetype: null,
+    };
+
+    if (this.messageCache.add(payload)) {
+      this.broadcast('message', payload);
+    }
+
+    return payload;
+  }
+
+  async sendMedia(base64Data, mimetype, filename) {
+    if (!this.isReady) {
+      throw new Error('Client not ready');
+    }
+
+    const base64Body = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+    const media = new MessageMedia(mimetype, base64Body, filename);
+
+    await this.client.sendMessage(this.config.targetContact, media, { sendSeen: false });
+
+    const payload = {
+      from: this.client.info?.wid?._serialized || 'me',
+      to: this.config.targetContact,
+      body: `[Media: ${filename}]`,
+      timestamp: Math.floor(Date.now() / 1000),
+      mediaUrl: null,
+      mimetype,
+    };
+
+    if (this.messageCache.add(payload)) {
+      this.broadcast('message', payload);
+    }
+
+    return payload;
+  }
+
+  attemptReconnect() {
+    if (this.reconnectAttempts >= this.config.maxReconnectAttempts) {
+      log('error', 'Max reconnection attempts reached');
+      this.broadcast('max_reconnect_reached', { message: 'Please restart the server' });
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = this.config.reconnectDelayMs * this.reconnectAttempts;
+
+    log('info', `Reconnect attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts} in ${delay}ms`);
+
+    setTimeout(() => {
+      if (!this.isInitializing && !this.isReady) {
+        this.initialize();
+      }
+    }, delay);
+  }
+
+  async initialize() {
+    if (this.isInitializing) {
+      log('warn', 'Client already initializing');
+      return;
+    }
+
+    this.isInitializing = true;
+    log('info', 'Initializing WhatsApp client...');
+
+    try {
+      if (!this.client) {
+        this.createClient();
+      }
+      await this.client.initialize();
+      log('info', 'Client initialization started');
+    } catch (err) {
+      log('error', 'Failed to initialize client', { error: err.message });
+      this.isInitializing = false;
+      this.attemptReconnect();
+    }
+  }
+
+  async destroy() {
+    try {
+      clearTimeout(this.loadingTimeout);
+      clearTimeout(this.readyTimeout);
+      if (this.client) {
+        await this.client.destroy();
+      }
+    } catch (err) {
+      log('warn', 'Error destroying client', { error: err.message });
+    }
+  }
+
+  getStatus() {
+    return {
+      ready: this.isReady,
+      initializing: this.isInitializing,
+      hasQR: !!this.latestQR,
+      info: this.client?.info || null,
+      reconnectAttempts: this.reconnectAttempts,
+    };
+  }
+}
+
+// ============================================================================
+// Express & Socket.IO Setup
+// ============================================================================
+
+// Initialize components
+ensureDirectoryExists(CONFIG.mediaDir);
+const deviceTokens = new DeviceTokenManager(CONFIG.tokensFile);
+const messageCache = new MessageCache(CONFIG.maxCacheSize);
+
+// Express app
+const app = express();
+const server = http.createServer(app);
+
+// Socket.IO
+const io = new SocketIOServer(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
+  pingInterval: 10000,
+  pingTimeout: 5000,
+  transports: ['websocket', 'polling'],
 });
 
-// --------- Helper functions ----------
-function safeFilename(ext = 'bin') {
-  mediaCounter = (mediaCounter + 1) % 10000;
-  return `media_${Date.now()}_${mediaCounter}.${ext}`;
-}
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+app.use('/media', express.static(CONFIG.mediaDir));
 
-function clientIsReady() {
-  return !!(client && client.info && client.info.wid && isClientReady);
-}
+// Connected clients tracking
+const connectedClients = new Set();
 
-function addToCache(message) {
-  const exists = messageCache.some(m =>
-    m.timestamp === message.timestamp &&
-    m.body === message.body &&
-    m.from === message.from
-  );
-
-  if (!exists) {
-    messageCache.unshift(message);
-    if (messageCache.length > MAX_CACHE_SIZE) {
-      messageCache = messageCache.slice(0, MAX_CACHE_SIZE);
-    }
-    return true;
-  }
-  return false;
-}
-
-function broadcastToClients(event, data) {
-  console.log(`📡 Broadcasting ${event} to ${connectedClients.size} clients`);
+// Broadcast function
+function broadcast(event, data) {
+  log('debug', `Broadcasting ${event} to ${connectedClients.size} clients`);
   io.emit(event, data);
 }
 
-// --------- HTTP routes ----------
+// Initialize WhatsApp Manager
+const whatsapp = new WhatsAppManager(CONFIG, messageCache, deviceTokens, broadcast);
+
+// ============================================================================
+// HTTP Routes
+// ============================================================================
+
+// Health check
 app.get('/health', (req, res) => {
-  if (clientIsReady()) {
-    res.status(200).json({ status: 'connected', clients: connectedClients.size });
-  } else if (latestQR) {
-    res.status(200).json({ status: 'qr_required', clients: connectedClients.size });
-  } else {
-    res.status(200).json({ status: 'disconnected', clients: connectedClients.size });
+  const status = whatsapp.getStatus();
+  let statusCode = 'disconnected';
+
+  if (status.ready) {
+    statusCode = 'connected';
+  } else if (status.hasQR) {
+    statusCode = 'qr_required';
+  } else if (status.initializing) {
+    statusCode = 'initializing';
   }
+
+  res.json({
+    status: statusCode,
+    clients: connectedClients.size,
+    cache: messageCache.size,
+  });
 });
 
-app.get('/sync-messages', async (req, res) => {
-  if (!clientIsReady()) {
-    console.error('Sync aborted: WhatsApp client not ready');
-    return res.status(503).json({ error: 'WhatsApp client not ready' });
+// Sync messages
+app.get('/sync-messages', (req, res) => {
+  if (!whatsapp.isReady) {
+    return res.status(503).json({ error: 'WhatsApp client not ready', success: false });
   }
 
-  try {
-    console.log(`📤 Returning ${messageCache.length} cached messages`);
+  const messages = messageCache.getReversed();
+  log('info', `Syncing ${messages.length} messages`);
 
-    res.status(200).json({
-      message: 'Messages synced from cache',
-      count: messageCache.length,
-      success: true
-    });
+  // Broadcast messages to all clients
+  messages.forEach((msg) => broadcast('message', msg));
 
-    messageCache.slice().reverse().forEach(msg => {
-      broadcastToClients('message', msg);
-    });
-
-  } catch (err) {
-    console.error('❌ Sync failed:', err && err.stack ? err.stack : err);
-    res.status(500).json({
-      error: 'Sync failed',
-      detail: String(err && err.message ? err.message : err),
-      success: false
-    });
-  }
+  res.json({
+    message: 'Messages synced',
+    count: messages.length,
+    success: true,
+  });
 });
 
+// Cache info
 app.get('/cache-info', (req, res) => {
   res.json({
-    cacheSize: messageCache.length,
-    maxCacheSize: MAX_CACHE_SIZE,
+    ...messageCache.getInfo(),
     connectedClients: connectedClients.size,
-    oldestMessage: messageCache[messageCache.length - 1]?.timestamp || null,
-    newestMessage: messageCache[0]?.timestamp || null
   });
 });
 
+// Debug info
 app.get('/debug-info', (req, res) => {
   res.json({
-    ready: clientIsReady(),
-    info: client.info || null,
-    latestQR: !!latestQR,
-    cacheSize: messageCache.length,
+    ...whatsapp.getStatus(),
+    cacheSize: messageCache.size,
     connectedClients: connectedClients.size,
-    reconnectAttempts: reconnectAttempts,
-    isInitializing: isInitializing
+    deviceTokens: deviceTokens.size,
   });
 });
 
+// Test send
 app.post('/test-send', async (req, res) => {
-  if (!clientIsReady()) {
+  if (!whatsapp.isReady) {
     return res.status(503).json({ error: 'Client not ready' });
   }
 
   try {
-    console.log('Testing send to:', TARGET_CONTACT);
-    const result = await client.sendMessage(TARGET_CONTACT, 'Test message from backend', { sendSeen: false });
+    const result = await whatsapp.sendMessage('Test message from backend');
     res.json({ success: true, result });
   } catch (err) {
-    console.error('Test send failed:', err);
-    res.status(500).json({ error: err.message, stack: err.stack });
+    log('error', 'Test send failed', { error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
+// Register device for push notifications
 app.post('/register-device', (req, res) => {
   const { token } = req.body;
 
   if (!token || typeof token !== 'string') {
-    return res.status(400).json({ error: 'token_required' });
+    return res.status(400).json({ error: 'Token required' });
   }
 
-  const before = deviceTokens.size;
   deviceTokens.add(token);
-
-  if (deviceTokens.size !== before) {
-    saveDeviceTokens();
-    console.log('📲 Device token stored:', token.slice(0, 12));
-  }
-
   res.json({ success: true });
 });
 
-// --------- Client events ----------
-client.on('qr', (qr) => {
-  latestQR = qr;
-  isClientReady = false;
-  console.log('📱 QR RECEIVED');
-  qrcode.generate(qr, { small: true });
-  broadcastToClients('qr', qr);
-});
+// ============================================================================
+// Socket.IO Connection Handling
+// ============================================================================
 
-client.on('authenticated', () => {
-  console.log('✅ Authentication successful');
-  console.log('⏳ Connecting to WhatsApp...');
-  latestQR = null;
-  broadcastToClients('authenticated', { status: 'authenticated' });
-  
-  // WORKAROUND: Force ready if stuck after 15 seconds
-  setTimeout(() => {
-    if (!isClientReady && client.info) {
-      console.log('⚠️ Forcing ready event after timeout');
-      client.emit('ready');
-    }
-  }, 15000);
-});
-
-client.on('auth_failure', (msg) => {
-  console.error('❌ Auth failed:', msg);
-  isInitializing = false;
-  broadcastToClients('auth_failure', { error: msg });
-});
-
-// WORKAROUND: Force ready event if stuck at 100%
-let loadingTimeout;
-client.on('loading_screen', (percent, message) => {
-  console.log(`⏳ Loading: ${percent}% - ${message}`);
-  broadcastToClients('loading', { percent, message });
-  
-  // If we hit 100% and authenticated, force ready after 5 seconds
-  if (percent === 100 && !isClientReady) {
-    clearTimeout(loadingTimeout);
-    loadingTimeout = setTimeout(() => {
-      if (!isClientReady && client.info) {
-        console.log('⚠️ Forcing ready event (stuck at 100%)');
-        client.emit('ready');
-      }
-    }, 5000);
-  }
-});
-
-// CRITICAL FIX: Simplified ready handler with delayed message loading
-client.on('ready', async () => {
-  console.log('🎉🎉🎉 READY EVENT FIRED 🎉🎉🎉');
-  
-  isClientReady = true;
-  isInitializing = false;
-  reconnectAttempts = 0;
-  latestQR = null;
-  
-  console.log('📱 Connected as:', client.info?.pushname || 'Unknown');
-  console.log('📞 Phone:', client.info?.wid?._serialized || 'Unknown');
-  
-  // Broadcast ready immediately
-  broadcastToClients('ready', { 
-    status: 'connected',
-    info: {
-      pushname: client.info?.pushname || 'User',
-      phone: client.info?.wid?._serialized || 'Unknown'
-    }
-  });
-
-  console.log('✅ Client is now READY and accepting messages!');
-  
-  // Load messages with longer delay to allow WhatsApp to fully stabilize
-  setTimeout(async () => {
-    try {
-      console.log('📥 Waiting for WhatsApp to fully stabilize...');
-      
-      // Wait additional 10 seconds for full initialization
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      
-      console.log('📥 Now attempting to load messages...');
-      const chats = await client.getChats();
-      console.log(`Found ${chats.length} total chats`);
-      
-      const targetChat = chats.find(chat => chat.id._serialized === TARGET_CONTACT);
-      
-      if (!targetChat) {
-        console.log('⚠️ Target chat not found');
-        console.log('✅ Ready for new messages - history will populate as messages arrive');
-        return;
-      }
-      
-      console.log('✅ Target chat found, attempting to fetch messages...');
-      
-      if (typeof targetChat.fetchMessages === 'function') {
-        try {
-          const messages = await targetChat.fetchMessages({ limit: 20 });
-          console.log(`✅ Successfully loaded ${messages.length} messages`);
-
-          for (const msg of messages.reverse()) {
-            try {
-              let mediaUrl = null;
-              
-              if (msg.hasMedia) {
-                try {
-                  const media = await msg.downloadMedia();
-                  if (media?.data) {
-                    const buffer = Buffer.from(media.data, 'base64');
-                    const ext = media.mimetype?.split('/')[1] || 'bin';
-                    const filename = safeFilename(ext);
-                    fs.writeFileSync(path.join(MEDIA_DIR, filename), buffer);
-                    mediaUrl = `${BASE_URL}/media/${filename}`;
-                  }
-                } catch (e) {
-                  console.warn('Media download failed:', e.message);
-                }
-              }
-
-              const payload = {
-                from: msg.from,
-                to: msg.to,
-                body: msg.body || '',
-                timestamp: msg.timestamp,
-                mediaUrl,
-                mimetype: msg._data?.mimetype || null
-              };
-
-              addToCache(payload);
-            } catch (e) {
-              console.warn('Message processing error:', e.message);
-            }
-          }
-
-          console.log(`✅ Cached ${messageCache.length} messages`);
-          
-          // Broadcast all messages
-          messageCache.slice().reverse().forEach(msg => {
-            broadcastToClients('message', msg);
-          });
-        } catch (fetchErr) {
-          console.error('Could not fetch messages:', fetchErr.message);
-          console.log('⚠️ Continuing without message history - real-time messages will work');
-        }
-      } else {
-        console.warn('Chat found but fetchMessages not available');
-        console.log('⚠️ Continuing without message history - real-time messages will work');
-      }
-    } catch (err) {
-      console.error('Error loading messages:', err.message);
-      console.log('⚠️ Continuing without message history - real-time messages will work');
-    }
-  }, 2000);
-});
-
-// Message handlers
-client.on('message', async (msg) => {
-  try {
-    console.log(`📨 Incoming message from ${msg.from}`);
-    
-    if (msg.from === TARGET_CONTACT || msg.to === TARGET_CONTACT) {
-      let mediaUrl = null;
-      
-      if (msg.hasMedia) {
-        try {
-          const media = await msg.downloadMedia();
-          if (media?.data) {
-            const buffer = Buffer.from(media.data, 'base64');
-            const ext = media.mimetype?.split('/')[1] || 'bin';
-            const filename = safeFilename(ext);
-            fs.writeFileSync(path.join(MEDIA_DIR, filename), buffer);
-            mediaUrl = `${BASE_URL}/media/${filename}`;
-          }
-        } catch (e) {
-          console.warn('Media download failed:', e.message);
-        }
-      }
-
-      const payload = {
-        from: msg.from,
-        to: msg.to,
-        body: msg.body || '',
-        timestamp: msg.timestamp,
-        mediaUrl,
-        mimetype: msg._data?.mimetype || null
-      };
-
-      const isNew = addToCache(payload);
-      
-      if (isNew) {
-        console.log(`📤 Broadcasting message to ${connectedClients.size} clients`);
-        broadcastToClients('message', payload);
-      }
-      
-      // Push notification
-      if (!msg.fromMe && deviceTokens.size > 0) {
-        sendPush(
-          [...deviceTokens],
-          {
-            title: 'Nexus Terminal',
-            body: getStealthNotification(),
-            data: { type: 'incoming_signal', ts: String(msg.timestamp) }
-          },
-          (deadToken) => {
-            deviceTokens.delete(deadToken);
-            saveDeviceTokens();
-          }
-        ).catch(err => console.error('Push failed:', err.message));
-      }
-    }
-  } catch (err) {
-    console.error('Error in message handler:', err.message);
-  }
-});
-
-client.on('message_create', async (msg) => {
-  try {
-    if (msg.to === TARGET_CONTACT && msg.fromMe) {
-      const payload = {
-        from: client.info?.wid?._serialized || 'me',
-        to: msg.to,
-        body: msg.body || '',
-        timestamp: msg.timestamp || Date.now(),
-        mediaUrl: null,
-        mimetype: null
-      };
-
-      const isNew = addToCache(payload);
-      if (isNew) {
-        console.log(`📤 Broadcasting sent message`);
-        broadcastToClients('message', payload);
-      }
-    }
-  } catch (err) {
-    console.error('Error in message_create:', err.message);
-  }
-});
-
-client.on('disconnected', (reason) => {
-  console.error('❌ WhatsApp disconnected:', reason);
-  isClientReady = false;
-  isInitializing = false;
-  latestQR = null;
-  
-  broadcastToClients('disconnected', { reason });
-
-  if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-    reconnectAttempts++;
-    console.log(`🔄 Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}...`);
-    
-    setTimeout(() => {
-      if (!isInitializing && !isClientReady) {
-        isInitializing = true;
-        console.log('Attempting to re-initialize...');
-        client.initialize().catch(e => {
-          console.error('Re-init failed:', e.message);
-          isInitializing = false;
-        });
-      }
-    }, RECONNECT_DELAY_MS * reconnectAttempts);
-  } else {
-    console.error('❌ Max reconnection attempts reached.');
-    broadcastToClients('max_reconnect_reached', { message: 'Please restart the server' });
-  }
-});
-
-client.on('change_state', (state) => {
-  console.log('📶 State changed:', state);
-  broadcastToClients('state_change', { state });
-});
-
-client.on('error', (err) => {
-  console.error('❌ Client error:', err.message);
-});
-
-// --------- Socket.IO ----------
 io.on('connection', (socket) => {
   connectedClients.add(socket.id);
-  console.log(`🔌 Client connected [${socket.id}] - Total: ${connectedClients.size}`);
+  log('info', `Client connected [${socket.id}] - Total: ${connectedClients.size}`);
 
-  if (clientIsReady()) {
+  // Send current state to new client
+  if (whatsapp.isReady) {
     socket.emit('ready', { status: 'connected' });
 
-    if (messageCache.length > 0) {
-      console.log(`📤 Sending ${messageCache.length} cached messages`);
-      messageCache.slice().reverse().forEach(msg => {
-        socket.emit('message', msg);
-      });
+    // Send cached messages
+    const messages = messageCache.getReversed();
+    if (messages.length > 0) {
+      log('info', `Sending ${messages.length} cached messages to new client`);
+      messages.forEach((msg) => socket.emit('message', msg));
     }
-  } else if (latestQR) {
-    socket.emit('qr', latestQR);
+  } else if (whatsapp.latestQR) {
+    socket.emit('qr', whatsapp.latestQR);
   } else {
     socket.emit('disconnected', { reason: 'not_ready' });
   }
 
+  // Handle disconnect
   socket.on('disconnect', () => {
     connectedClients.delete(socket.id);
-    console.log(`🔌 Client disconnected [${socket.id}] - Total: ${connectedClients.size}`);
+    log('info', `Client disconnected [${socket.id}] - Total: ${connectedClients.size}`);
   });
 
+  // Handle status request
   socket.on('request_status', () => {
-    if (clientIsReady()) {
+    if (whatsapp.isReady) {
       socket.emit('ready', { status: 'connected' });
-    } else if (latestQR) {
-      socket.emit('qr', latestQR);
+    } else if (whatsapp.latestQR) {
+      socket.emit('qr', whatsapp.latestQR);
     } else {
       socket.emit('disconnected', { reason: 'not_ready' });
     }
   });
 
+  // Handle send message
   socket.on('send_message', async ({ message }) => {
-    if (!clientIsReady()) {
+    if (!whatsapp.isReady) {
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
 
     try {
-      console.log(`📤 Sending message to ${TARGET_CONTACT}`);
-      await client.sendMessage(TARGET_CONTACT, message, { sendSeen: false });
-
-      const payload = {
-        from: client.info?.wid?._serialized || 'me',
-        to: TARGET_CONTACT,
-        body: message,
-        timestamp: Date.now(),
-        mediaUrl: null,
-        mimetype: null
-      };
-
-      const isNew = addToCache(payload);
-      if (isNew) {
-        broadcastToClients('message', payload);
-      }
-
+      log('info', `Sending message to ${CONFIG.targetContact}`);
+      await whatsapp.sendMessage(message);
       socket.emit('send_result', { ok: true });
     } catch (err) {
-      console.error('Send failed:', err.message);
+      log('error', 'Send message failed', { error: err.message });
       socket.emit('send_result', { ok: false, error: err.message });
     }
   });
 
+  // Handle send media
   socket.on('send_media', async ({ base64, mimetype, filename }) => {
-    if (!clientIsReady()) {
+    if (!whatsapp.isReady) {
       return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
     }
 
     try {
-      const base64Body = base64.includes(',') ? base64.split(',')[1] : base64;
-      const media = new MessageMedia(mimetype, base64Body, filename);
-
-      console.log(`📤 Sending media: ${filename}`);
-      await client.sendMessage(TARGET_CONTACT, media, { sendSeen: false });
-
-      const payload = {
-        from: client.info?.wid?._serialized || 'me',
-        to: TARGET_CONTACT,
-        body: `[Media: ${filename}]`,
-        timestamp: Date.now(),
-        mediaUrl: null,
-        mimetype
-      };
-
-      const isNew = addToCache(payload);
-      if (isNew) {
-        broadcastToClients('message', payload);
-      }
-
+      log('info', `Sending media: ${filename}`);
+      await whatsapp.sendMedia(base64, mimetype, filename);
       socket.emit('send_result', { ok: true });
     } catch (err) {
-      console.error('Send media failed:', err.message);
+      log('error', 'Send media failed', { error: err.message });
       socket.emit('send_result', { ok: false, error: err.message });
     }
   });
 });
 
-// --------- Start server ----------
-const PORT = parseInt(process.env.PORT || '3001', 10);
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Target contact: ${TARGET_CONTACT}`);
-});
+// ============================================================================
+// Media Cleanup
+// ============================================================================
 
-// Initialize client
-console.log('🚀 Initializing WhatsApp client...');
-isInitializing = true;
-
-client.initialize()
-  .then(() => console.log('Client initialization started'))
-  .catch(err => {
-    console.error('Failed to initialize:', err.message);
-    isInitializing = false;
-  });
-
-// --------- Cleanup ----------
-setInterval(() => {
+function cleanupOldMedia() {
   try {
-    const files = fs.readdirSync(MEDIA_DIR);
-    let deleted = 0;
+    const files = fs.readdirSync(CONFIG.mediaDir);
+    let deletedCount = 0;
     const now = Date.now();
+    const maxAge = CONFIG.mediaRetentionDays * 24 * 60 * 60 * 1000;
 
-    files.forEach(file => {
+    files.forEach((file) => {
       try {
-        const filePath = path.join(MEDIA_DIR, file);
+        const filePath = path.join(CONFIG.mediaDir, file);
         const stats = fs.statSync(filePath);
-        const age = (now - stats.mtimeMs) / (1000 * 60 * 60 * 24);
-        if (age > 15) {
+        if (now - stats.mtimeMs > maxAge) {
           fs.unlinkSync(filePath);
-          deleted++;
+          deletedCount++;
         }
-      } catch (e) {}
+      } catch (err) {
+        // Ignore individual file errors
+      }
     });
 
-    if (deleted > 0) console.log(`🧹 Deleted ${deleted} old media files`);
-  } catch (err) {}
-}, 1000 * 60 * 60 * 12);
+    if (deletedCount > 0) {
+      log('info', `Cleaned up ${deletedCount} old media files`);
+    }
+  } catch (err) {
+    log('warn', 'Media cleanup failed', { error: err.message });
+  }
+}
 
-// --------- Shutdown ----------
+// Run cleanup every 12 hours
+setInterval(cleanupOldMedia, 12 * 60 * 60 * 1000);
+
+// ============================================================================
+// Startup & Shutdown
+// ============================================================================
+
+async function startup() {
+  // Initialize push service
+  pushService = await initializePushService();
+
+  // Start HTTP server
+  server.listen(CONFIG.port, () => {
+    log('success', `🚀 Server running on port ${CONFIG.port}`);
+    log('info', `Target contact: ${CONFIG.targetContact}`);
+    log('info', `Media directory: ${CONFIG.mediaDir}`);
+  });
+
+  // Initialize WhatsApp client
+  whatsapp.initialize();
+}
+
 async function shutdown(signal) {
-  console.log(`Received ${signal}. Shutting down...`);
-  isClientReady = false;
-  broadcastToClients('server_shutdown', { reason: signal });
-  
-  try { await client.destroy(); } catch (e) {}
-  
+  log('info', `Received ${signal}. Shutting down gracefully...`);
+
+  // Notify clients
+  broadcast('server_shutdown', { reason: signal });
+
+  // Destroy WhatsApp client
+  await whatsapp.destroy();
+
+  // Close server
   server.close(() => {
-    console.log('Server closed.');
+    log('info', 'Server closed');
     process.exit(0);
   });
 
-  setTimeout(() => process.exit(1), 5000);
+  // Force exit after 5 seconds
+  setTimeout(() => {
+    log('warn', 'Forced shutdown');
+    process.exit(1);
+  }, 5000);
 }
 
+// Handle shutdown signals
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('uncaughtException', (err) => {
+  log('error', 'Uncaught exception', { error: err.message, stack: err.stack });
+});
+process.on('unhandledRejection', (reason) => {
+  log('error', 'Unhandled rejection', { reason: String(reason) });
+});
+
+// Start the application
+startup();

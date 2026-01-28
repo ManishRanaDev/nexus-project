@@ -239,6 +239,14 @@ client.on('authenticated', () => {
   console.log('⏳ Connecting to WhatsApp...');
   latestQR = null;
   broadcastToClients('authenticated', { status: 'authenticated' });
+  
+  // WORKAROUND: Force ready if stuck after 15 seconds
+  setTimeout(() => {
+    if (!isClientReady && client.info) {
+      console.log('⚠️ Forcing ready event after timeout');
+      client.emit('ready');
+    }
+  }, 15000);
 });
 
 client.on('auth_failure', (msg) => {
@@ -250,6 +258,24 @@ client.on('auth_failure', (msg) => {
 client.on('loading_screen', (percent, message) => {
   console.log(`⏳ Loading: ${percent}% - ${message}`);
   broadcastToClients('loading', { percent, message });
+});
+
+// WORKAROUND: Force ready event if stuck at 100%
+let loadingTimeout;
+client.on('loading_screen', (percent, message) => {
+  console.log(`⏳ Loading: ${percent}% - ${message}`);
+  broadcastToClients('loading', { percent, message });
+  
+  // If we hit 100% and authenticated, force ready after 5 seconds
+  if (percent === 100 && !isClientReady) {
+    clearTimeout(loadingTimeout);
+    loadingTimeout = setTimeout(() => {
+      if (!isClientReady && client.info) {
+        console.log('⚠️ Forcing ready event (stuck at 100%)');
+        client.emit('ready');
+      }
+    }, 5000);
+  }
 });
 
 // CRITICAL FIX: Simplified ready handler

@@ -255,11 +255,6 @@ client.on('auth_failure', (msg) => {
   broadcastToClients('auth_failure', { error: msg });
 });
 
-client.on('loading_screen', (percent, message) => {
-  console.log(`⏳ Loading: ${percent}% - ${message}`);
-  broadcastToClients('loading', { percent, message });
-});
-
 // WORKAROUND: Force ready event if stuck at 100%
 let loadingTimeout;
 client.on('loading_screen', (percent, message) => {
@@ -308,50 +303,56 @@ client.on('ready', async () => {
       const chats = await client.getChats();
       const targetChat = chats.find(chat => chat.id._serialized === TARGET_CONTACT);
       
-      if (targetChat) {
-        const messages = await targetChat.fetchMessages({ limit: 50 });
-        console.log(`Found ${messages.length} messages`);
+      if (targetChat && typeof targetChat.fetchMessages === 'function') {
+        try {
+          const messages = await targetChat.fetchMessages({ limit: 50 });
+          console.log(`Found ${messages.length} messages`);
 
-        for (const msg of messages.reverse()) {
-          try {
-            let mediaUrl = null;
-            
-            if (msg.hasMedia) {
-              try {
-                const media = await msg.downloadMedia();
-                if (media?.data) {
-                  const buffer = Buffer.from(media.data, 'base64');
-                  const ext = media.mimetype?.split('/')[1] || 'bin';
-                  const filename = safeFilename(ext);
-                  fs.writeFileSync(path.join(MEDIA_DIR, filename), buffer);
-                  mediaUrl = `${BASE_URL}/media/${filename}`;
+          for (const msg of messages.reverse()) {
+            try {
+              let mediaUrl = null;
+              
+              if (msg.hasMedia) {
+                try {
+                  const media = await msg.downloadMedia();
+                  if (media?.data) {
+                    const buffer = Buffer.from(media.data, 'base64');
+                    const ext = media.mimetype?.split('/')[1] || 'bin';
+                    const filename = safeFilename(ext);
+                    fs.writeFileSync(path.join(MEDIA_DIR, filename), buffer);
+                    mediaUrl = `${BASE_URL}/media/${filename}`;
+                  }
+                } catch (e) {
+                  console.warn('Media download failed:', e.message);
                 }
-              } catch (e) {
-                console.warn('Media download failed:', e.message);
               }
+
+              const payload = {
+                from: msg.from,
+                to: msg.to,
+                body: msg.body || '',
+                timestamp: msg.timestamp,
+                mediaUrl,
+                mimetype: msg._data?.mimetype || null
+              };
+
+              addToCache(payload);
+            } catch (e) {
+              console.warn('Message processing error:', e.message);
             }
-
-            const payload = {
-              from: msg.from,
-              to: msg.to,
-              body: msg.body || '',
-              timestamp: msg.timestamp,
-              mediaUrl,
-              mimetype: msg._data?.mimetype || null
-            };
-
-            addToCache(payload);
-          } catch (e) {
-            console.warn('Message processing error:', e.message);
           }
-        }
 
-        console.log(`✅ Cached ${messageCache.length} messages`);
-        
-        // Broadcast all messages
-        messageCache.slice().reverse().forEach(msg => {
-          broadcastToClients('message', msg);
-        });
+          console.log(`✅ Cached ${messageCache.length} messages`);
+          
+          // Broadcast all messages
+          messageCache.slice().reverse().forEach(msg => {
+            broadcastToClients('message', msg);
+          });
+        } catch (fetchErr) {
+          console.warn('Could not fetch messages:', fetchErr.message);
+        }
+      } else {
+        console.warn('Chat found but fetchMessages not available');
       }
     } catch (err) {
       console.error('Error loading messages:', err.message);

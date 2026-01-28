@@ -273,7 +273,7 @@ client.on('loading_screen', (percent, message) => {
   }
 });
 
-// CRITICAL FIX: Simplified ready handler
+// CRITICAL FIX: Simplified ready handler with delayed message loading
 client.on('ready', async () => {
   console.log('🎉🎉🎉 READY EVENT FIRED 🎉🎉🎉');
   
@@ -296,17 +296,32 @@ client.on('ready', async () => {
 
   console.log('✅ Client is now READY and accepting messages!');
   
-  // Load messages in background (don't wait)
+  // Load messages with longer delay to allow WhatsApp to fully stabilize
   setTimeout(async () => {
     try {
-      console.log('📥 Loading initial messages...');
+      console.log('📥 Waiting for WhatsApp to fully stabilize...');
+      
+      // Wait additional 10 seconds for full initialization
+      await new Promise(resolve => setTimeout(resolve, 10000));
+      
+      console.log('📥 Now attempting to load messages...');
       const chats = await client.getChats();
+      console.log(`Found ${chats.length} total chats`);
+      
       const targetChat = chats.find(chat => chat.id._serialized === TARGET_CONTACT);
       
-      if (targetChat && typeof targetChat.fetchMessages === 'function') {
+      if (!targetChat) {
+        console.log('⚠️ Target chat not found');
+        console.log('✅ Ready for new messages - history will populate as messages arrive');
+        return;
+      }
+      
+      console.log('✅ Target chat found, attempting to fetch messages...');
+      
+      if (typeof targetChat.fetchMessages === 'function') {
         try {
-          const messages = await targetChat.fetchMessages({ limit: 50 });
-          console.log(`Found ${messages.length} messages`);
+          const messages = await targetChat.fetchMessages({ limit: 20 });
+          console.log(`✅ Successfully loaded ${messages.length} messages`);
 
           for (const msg of messages.reverse()) {
             try {
@@ -349,13 +364,16 @@ client.on('ready', async () => {
             broadcastToClients('message', msg);
           });
         } catch (fetchErr) {
-          console.warn('Could not fetch messages:', fetchErr.message);
+          console.error('Could not fetch messages:', fetchErr.message);
+          console.log('⚠️ Continuing without message history - real-time messages will work');
         }
       } else {
         console.warn('Chat found but fetchMessages not available');
+        console.log('⚠️ Continuing without message history - real-time messages will work');
       }
     } catch (err) {
       console.error('Error loading messages:', err.message);
+      console.log('⚠️ Continuing without message history - real-time messages will work');
     }
   }, 2000);
 });

@@ -1,6 +1,10 @@
 /**
- * Nexus Terminal Backend v2.0
- * WhatsApp Integration Server with Socket.IO Real-time Communication
+ * Nexus Terminal Backend v2.1
+ * WhatsApp Integration Server with Enhanced Reliability
+ * - Message queue with retry logic
+ * - Connection health monitoring
+ * - Better error recovery
+ * - Improved sync mechanism
  */
 
 'use strict';
@@ -26,15 +30,23 @@ const CONFIG = {
   baseUrl: process.env.PUBLIC_URL || 'http://localhost:3001',
   mediaDir: path.join(__dirname, 'public'),
   tokensFile: path.join(__dirname, 'deviceTokens.json'),
+  queueFile: path.join(__dirname, 'messageQueue.json'),
   maxCacheSize: 100,
-  maxReconnectAttempts: 3,
-  reconnectDelayMs: 5000,
+  maxReconnectAttempts: 5,
+  reconnectDelayMs: 3000,
   mediaRetentionDays: 15,
-  clientStabilizationDelayMs: 8000,
-  messageLoadDelayMs: 3000,
+  clientStabilizationDelayMs: 5000,
+  messageLoadDelayMs: 2000,
+  // Message queue settings
+  maxQueueSize: 50,
+  maxRetries: 3,
+  retryDelayMs: 2000,
+  // Health monitoring
+  healthCheckIntervalMs: 30000,
+  connectionTimeoutMs: 60000,
 };
 
-// Stealth notification messages for push notifications
+// Stealth notification messages
 const STEALTH_MESSAGES = [
   'New event received',
   'Background task completed',
@@ -61,10 +73,12 @@ function getRandomStealthMessage() {
   return STEALTH_MESSAGES[Math.floor(Math.random() * STEALTH_MESSAGES.length)];
 }
 
+function generateId() {
+  return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+}
+
 function generateMediaFilename(extension = 'bin') {
-  const timestamp = Date.now();
-  const random = Math.random().toString(36).substring(2, 8);
-  return `media_${timestamp}_${random}.${extension}`;
+  return `media_${Date.now()}_${Math.random().toString(36).substring(2, 8)}.${extension}`;
 }
 
 function ensureDirectoryExists(dirPath) {
@@ -72,6 +86,10 @@ function ensureDirectoryExists(dirPath) {
     fs.mkdirSync(dirPath, { recursive: true });
     log('info', `Created directory: ${dirPath}`);
   }
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // ============================================================================
@@ -87,8 +105,7 @@ class DeviceTokenManager {
   load() {
     try {
       if (fs.existsSync(this.filePath)) {
-        const data = fs.readFileSync(this.filePath, 'utf8');
-        return new Set(JSON.parse(data));
+        return new Set(JSON.parse(fs.readFileSync(this.filePath, 'utf8')));
       }
     } catch (err) {
       log('warn', 'Failed to load device tokens', { error: err.message });
@@ -106,31 +123,121 @@ class DeviceTokenManager {
 
   add(token) {
     if (!token || typeof token !== 'string') return false;
-    const hadToken = this.tokens.has(token);
-    this.tokens.add(token);
-    if (!hadToken) {
+    if (!this.tokens.has(token)) {
+      this.tokens.add(token);
       this.save();
-      log('info', 'Device token registered', { tokenPrefix: token.slice(0, 12) });
-    }
-    return !hadToken;
-  }
-
-  remove(token) {
-    if (this.tokens.delete(token)) {
-      this.save();
-      log('info', 'Device token removed', { tokenPrefix: token.slice(0, 12) });
+      log('info', 'Device token registered');
       return true;
     }
     return false;
   }
 
-  getAll() {
-    return [...this.tokens];
+  remove(token) {
+    if (this.tokens.delete(token)) {
+      this.save();
+      return true;
+    }
+    return false;
   }
 
-  get size() {
-    return this.tokens.size;
+  getAll() { return [...this.tokens]; }
+  get size() { return this.tokens.size; }
+}
+
+// ============================================================================
+// Message Queue with Retry Logic
+// ============================================================================
+
+class MessageQueue {
+  constructor(filePath, maxSize = 50) {
+    this.filePath = filePath;
+    this.maxSize = maxSize;
+    this.queue = this.load();
+    this.processing = false;
   }
+
+  load() {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        return JSON.parse(fs.readFileSync(this.filePath, 'utf8'));
+      }
+    } catch (err) {
+      log('warn', 'Failed to load message queue', { error: err.message });
+    }
+    return [];
+  }
+
+  save() {
+    try {
+      fs.writeFileSync(this.filePath, JSON.stringify(this.queue, null, 2));
+    } catch (err) {
+      log('error', 'Failed to save message queue', { error: err.message });
+    }
+  }
+
+  add(message) {
+    const queueItem = {
+      id: generateId(),
+      message,
+      retries: 0,
+      createdAt: Date.now(),
+      status: 'pending',
+    };
+
+    this.queue.push(queueItem);
+    if (this.queue.length > this.maxSize) {
+      this.queue = this.queue.slice(-this.maxSize);
+    }
+    this.save();
+    return queueItem.id;
+  }
+
+  getPending() {
+    return this.queue.filter(item => item.status === 'pending');
+  }
+
+  updateStatus(id, status, error = null) {
+    const item = this.queue.find(q => q.id === id);
+    if (item) {
+      item.status = status;
+      item.lastAttempt = Date.now();
+      if (error) item.error = error;
+      this.save();
+    }
+  }
+
+  incrementRetry(id) {
+    const item = this.queue.find(q => q.id === id);
+    if (item) {
+      item.retries++;
+      item.lastAttempt = Date.now();
+      this.save();
+      return item.retries;
+    }
+    return 0;
+  }
+
+  remove(id) {
+    const idx = this.queue.findIndex(q => q.id === id);
+    if (idx !== -1) {
+      this.queue.splice(idx, 1);
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  getById(id) {
+    return this.queue.find(q => q.id === id);
+  }
+
+  clear() {
+    this.queue = [];
+    this.save();
+  }
+
+  get size() { return this.queue.length; }
+  get pendingCount() { return this.getPending().length; }
 }
 
 // ============================================================================
@@ -141,41 +248,40 @@ class MessageCache {
   constructor(maxSize = 100) {
     this.messages = [];
     this.maxSize = maxSize;
+    this.messageIds = new Set();
+  }
+
+  generateMessageId(msg) {
+    return `${msg.from}-${msg.timestamp}-${msg.body?.slice(0, 20) || 'media'}`;
   }
 
   add(message) {
-    // Check for duplicates
-    const isDuplicate = this.messages.some(
-      (m) =>
-        m.timestamp === message.timestamp &&
-        m.body === message.body &&
-        m.from === message.from
-    );
+    const msgId = this.generateMessageId(message);
+    if (this.messageIds.has(msgId)) return false;
 
-    if (isDuplicate) return false;
-
+    this.messageIds.add(msgId);
     this.messages.unshift(message);
+
     if (this.messages.length > this.maxSize) {
-      this.messages = this.messages.slice(0, this.maxSize);
+      const removed = this.messages.pop();
+      this.messageIds.delete(this.generateMessageId(removed));
     }
     return true;
   }
 
-  getAll() {
-    return [...this.messages];
-  }
+  getAll() { return [...this.messages]; }
+  getReversed() { return [...this.messages].reverse(); }
 
-  getReversed() {
-    return [...this.messages].reverse();
+  getSince(timestamp) {
+    return this.messages.filter(m => m.timestamp > timestamp);
   }
 
   clear() {
     this.messages = [];
+    this.messageIds.clear();
   }
 
-  get size() {
-    return this.messages.length;
-  }
+  get size() { return this.messages.length; }
 
   getInfo() {
     return {
@@ -197,11 +303,7 @@ async function initializePushService() {
   try {
     const admin = require('firebase-admin');
 
-    if (
-      !process.env.FCM_PROJECT_ID ||
-      !process.env.FCM_CLIENT_EMAIL ||
-      !process.env.FCM_PRIVATE_KEY
-    ) {
+    if (!process.env.FCM_PROJECT_ID || !process.env.FCM_CLIENT_EMAIL || !process.env.FCM_PRIVATE_KEY) {
       log('warn', 'Firebase credentials not configured - push notifications disabled');
       return null;
     }
@@ -216,7 +318,7 @@ async function initializePushService() {
       });
     }
 
-    log('success', 'Firebase Admin initialized successfully');
+    log('success', 'Firebase Admin initialized');
     return admin;
   } catch (err) {
     log('error', 'Failed to initialize Firebase', { error: err.message });
@@ -235,61 +337,46 @@ async function sendPushNotification(tokens, payload, onInvalidToken) {
         body: payload.body || getRandomStealthMessage(),
       },
       data: payload.data || {},
-      android: {
-        priority: 'high',
-        notification: {
-          sound: 'default',
-          channelId: 'nexus_channel',
-        },
-      },
-      apns: {
-        payload: {
-          aps: {
-            sound: 'default',
-            badge: 1,
-          },
-        },
-      },
+      android: { priority: 'high', notification: { sound: 'default', channelId: 'nexus_channel' } },
+      apns: { payload: { aps: { sound: 'default', badge: 1 } } },
     });
 
-    let successCount = 0;
     response.responses.forEach((res, idx) => {
-      if (res.success) {
-        successCount++;
-      } else if (
+      if (!res.success && (
         res.error?.code === 'messaging/registration-token-not-registered' ||
         res.error?.code === 'messaging/invalid-registration-token'
-      ) {
-        if (typeof onInvalidToken === 'function') {
-          onInvalidToken(tokens[idx]);
-        }
+      )) {
+        if (typeof onInvalidToken === 'function') onInvalidToken(tokens[idx]);
       }
     });
-
-    log('info', `Push notifications sent: ${successCount}/${tokens.length}`);
   } catch (err) {
     log('error', 'Push notification failed', { error: err.message });
   }
 }
 
 // ============================================================================
-// WhatsApp Client Manager
+// WhatsApp Client Manager with Enhanced Reliability
 // ============================================================================
 
 class WhatsAppManager {
-  constructor(config, messageCache, deviceTokens, broadcastFn) {
+  constructor(config, messageCache, messageQueue, deviceTokens, broadcastFn) {
     this.config = config;
     this.messageCache = messageCache;
+    this.messageQueue = messageQueue;
     this.deviceTokens = deviceTokens;
     this.broadcast = broadcastFn;
 
     this.client = null;
     this.isReady = false;
     this.isInitializing = false;
+    this.isDestroying = false;
     this.latestQR = null;
     this.reconnectAttempts = 0;
     this.loadingTimeout = null;
     this.readyTimeout = null;
+    this.healthCheckInterval = null;
+    this.lastActivity = Date.now();
+    this.queueProcessor = null;
   }
 
   getPuppeteerConfig() {
@@ -312,12 +399,10 @@ class WhatsAppManager {
       '--safebrowsing-disable-auto-update',
     ];
 
-    // Single process mode for low-memory environments
     if (process.env.LOW_MEMORY === 'true') {
       args.push('--single-process');
     }
 
-    // Find Chrome/Chromium executable
     const possiblePaths = [
       process.env.CHROME_PATH,
       process.env.PUPPETEER_EXECUTABLE_PATH,
@@ -346,10 +431,7 @@ class WhatsAppManager {
       timeout: 60000,
     };
 
-    if (executablePath) {
-      config.executablePath = executablePath;
-    }
-
+    if (executablePath) config.executablePath = executablePath;
     return config;
   }
 
@@ -371,7 +453,6 @@ class WhatsAppManager {
   }
 
   setupEventHandlers() {
-    // QR Code Event
     this.client.on('qr', (qr) => {
       this.latestQR = qr;
       this.isReady = false;
@@ -380,13 +461,11 @@ class WhatsAppManager {
       this.broadcast('qr', qr);
     });
 
-    // Authentication Success
     this.client.on('authenticated', () => {
       log('success', 'Authentication successful');
       this.latestQR = null;
       this.broadcast('authenticated', { status: 'authenticated' });
 
-      // Fallback: Force ready if stuck after authentication
       this.readyTimeout = setTimeout(() => {
         if (!this.isReady && this.client?.info) {
           log('warn', 'Forcing ready event after authentication timeout');
@@ -395,19 +474,16 @@ class WhatsAppManager {
       }, 20000);
     });
 
-    // Authentication Failure
     this.client.on('auth_failure', (msg) => {
       log('error', 'Authentication failed', { message: msg });
       this.isInitializing = false;
       this.broadcast('auth_failure', { error: msg });
     });
 
-    // Loading Screen
     this.client.on('loading_screen', (percent, message) => {
       log('debug', `Loading: ${percent}% - ${message}`);
       this.broadcast('loading', { percent, message });
 
-      // If stuck at 100%, force ready
       if (percent === 100 && !this.isReady) {
         clearTimeout(this.loadingTimeout);
         this.loadingTimeout = setTimeout(() => {
@@ -419,53 +495,72 @@ class WhatsAppManager {
       }
     });
 
-    // Ready Event
     this.client.on('ready', () => {
       clearTimeout(this.readyTimeout);
       clearTimeout(this.loadingTimeout);
       this.handleReady();
     });
 
-    // Incoming Messages
     this.client.on('message', async (msg) => {
+      this.lastActivity = Date.now();
       await this.handleIncomingMessage(msg);
     });
 
-    // Sent Messages
     this.client.on('message_create', async (msg) => {
+      this.lastActivity = Date.now();
       await this.handleSentMessage(msg);
     });
 
-    // Disconnection
-    this.client.on('disconnected', (reason) => {
-      log('error', 'WhatsApp disconnected', { reason });
-      this.isReady = false;
-      this.isInitializing = false;
-      this.latestQR = null;
-      this.broadcast('disconnected', { reason });
-      this.attemptReconnect();
+    this.client.on('message_ack', (msg, ack) => {
+      // Acknowledge levels: -1 = error, 0 = pending, 1 = sent, 2 = delivered, 3 = read
+      this.broadcast('message_ack', {
+        messageId: msg.id._serialized,
+        ack,
+        timestamp: Date.now()
+      });
     });
 
-    // State Changes
+    this.client.on('disconnected', (reason) => {
+      log('error', 'WhatsApp disconnected', { reason });
+      this.handleDisconnection(reason);
+    });
+
     this.client.on('change_state', (state) => {
       log('debug', 'State changed', { state });
       this.broadcast('state_change', { state });
+
+      if (state === 'CONFLICT' || state === 'UNLAUNCHED') {
+        this.handleDisconnection(state);
+      }
     });
 
-    // Errors
     this.client.on('error', (err) => {
       log('error', 'Client error', { error: err.message });
     });
   }
 
+  handleDisconnection(reason) {
+    this.isReady = false;
+    this.isInitializing = false;
+    this.latestQR = null;
+    this.stopHealthCheck();
+    this.stopQueueProcessor();
+    this.broadcast('disconnected', { reason });
+
+    if (!this.isDestroying) {
+      this.attemptReconnect();
+    }
+  }
+
   async handleReady() {
-    if (this.isReady) return; // Prevent duplicate handling
+    if (this.isReady) return;
 
     log('success', '🎉 WhatsApp Client Ready!');
     this.isReady = true;
     this.isInitializing = false;
     this.reconnectAttempts = 0;
     this.latestQR = null;
+    this.lastActivity = Date.now();
 
     const clientInfo = {
       pushname: this.client.info?.pushname || 'User',
@@ -475,16 +570,128 @@ class WhatsAppManager {
     log('info', 'Connected as', clientInfo);
     this.broadcast('ready', { status: 'connected', info: clientInfo });
 
-    // Load message history after stabilization
+    // Start health monitoring
+    this.startHealthCheck();
+
+    // Start queue processor
+    this.startQueueProcessor();
+
+    // Load message history
     setTimeout(() => this.loadMessageHistory(), this.config.clientStabilizationDelayMs);
+  }
+
+  startHealthCheck() {
+    this.stopHealthCheck();
+
+    this.healthCheckInterval = setInterval(async () => {
+      if (!this.isReady || this.isDestroying) return;
+
+      try {
+        // Check if client is still responsive
+        const state = await this.client.getState();
+
+        if (state !== 'CONNECTED') {
+          log('warn', 'Health check: Client not connected', { state });
+          this.handleDisconnection(`health_check_failed: ${state}`);
+          return;
+        }
+
+        // Check for connection timeout
+        const timeSinceActivity = Date.now() - this.lastActivity;
+        if (timeSinceActivity > this.config.connectionTimeoutMs) {
+          log('warn', 'Health check: Connection timeout', { timeSinceActivity });
+          // Try to refresh connection
+          await this.refreshConnection();
+        }
+
+        this.broadcast('health_check', {
+          status: 'ok',
+          state,
+          lastActivity: this.lastActivity,
+          queueSize: this.messageQueue.pendingCount
+        });
+      } catch (err) {
+        log('error', 'Health check failed', { error: err.message });
+        this.handleDisconnection('health_check_error');
+      }
+    }, this.config.healthCheckIntervalMs);
+  }
+
+  stopHealthCheck() {
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+  }
+
+  async refreshConnection() {
+    try {
+      log('info', 'Refreshing connection...');
+      // Try to get chats to refresh connection
+      await this.client.getChats();
+      this.lastActivity = Date.now();
+      log('success', 'Connection refreshed');
+    } catch (err) {
+      log('error', 'Failed to refresh connection', { error: err.message });
+      throw err;
+    }
+  }
+
+  startQueueProcessor() {
+    this.stopQueueProcessor();
+
+    this.queueProcessor = setInterval(async () => {
+      if (!this.isReady || this.messageQueue.processing) return;
+
+      const pending = this.messageQueue.getPending();
+      if (pending.length === 0) return;
+
+      this.messageQueue.processing = true;
+
+      for (const item of pending) {
+        if (!this.isReady) break;
+
+        try {
+          log('info', `Processing queued message: ${item.id}`);
+
+          if (item.message.type === 'text') {
+            await this.sendMessageDirect(item.message.content);
+          } else if (item.message.type === 'media') {
+            await this.sendMediaDirect(item.message.base64, item.message.mimetype, item.message.filename);
+          }
+
+          this.messageQueue.updateStatus(item.id, 'sent');
+          this.broadcast('queue_item_sent', { id: item.id });
+
+          await sleep(500); // Rate limiting
+        } catch (err) {
+          log('error', `Failed to send queued message: ${item.id}`, { error: err.message });
+
+          const retries = this.messageQueue.incrementRetry(item.id);
+          if (retries >= this.config.maxRetries) {
+            this.messageQueue.updateStatus(item.id, 'failed', err.message);
+            this.broadcast('queue_item_failed', { id: item.id, error: err.message });
+          } else {
+            await sleep(this.config.retryDelayMs * retries);
+          }
+        }
+      }
+
+      this.messageQueue.processing = false;
+    }, 5000);
+  }
+
+  stopQueueProcessor() {
+    if (this.queueProcessor) {
+      clearInterval(this.queueProcessor);
+      this.queueProcessor = null;
+    }
   }
 
   async loadMessageHistory() {
     try {
       log('info', 'Loading message history...');
-
-      // Wait for client to fully stabilize
-      await new Promise((resolve) => setTimeout(resolve, this.config.messageLoadDelayMs));
+      await sleep(this.config.messageLoadDelayMs);
 
       if (!this.isReady) {
         log('warn', 'Client not ready, skipping message history load');
@@ -494,35 +701,36 @@ class WhatsAppManager {
       const chats = await this.client.getChats();
       log('info', `Found ${chats.length} chats`);
 
-      const targetChat = chats.find(
-        (chat) => chat.id._serialized === this.config.targetContact
-      );
+      const targetChat = chats.find(chat => chat.id._serialized === this.config.targetContact);
 
       if (!targetChat) {
         log('info', 'Target chat not found - will populate as messages arrive');
+        this.broadcast('history_loaded', { count: 0 });
         return;
       }
 
       log('info', 'Target chat found, loading messages...');
-
-      const messages = await targetChat.fetchMessages({ limit: 30 });
+      const messages = await targetChat.fetchMessages({ limit: 50 });
       log('info', `Loaded ${messages.length} messages from history`);
 
+      let loadedCount = 0;
       for (const msg of messages.reverse()) {
         try {
           const payload = await this.createMessagePayload(msg);
           if (payload && this.messageCache.add(payload)) {
             this.broadcast('message', payload);
+            loadedCount++;
           }
         } catch (err) {
           log('warn', 'Failed to process historical message', { error: err.message });
         }
       }
 
-      log('success', `Message cache populated with ${this.messageCache.size} messages`);
+      log('success', `Message cache populated with ${loadedCount} messages`);
+      this.broadcast('history_loaded', { count: loadedCount });
     } catch (err) {
       log('error', 'Failed to load message history', { error: err.message });
-      log('info', 'Real-time messaging will still work');
+      this.broadcast('history_loaded', { count: 0, error: err.message });
     }
   }
 
@@ -548,20 +756,20 @@ class WhatsAppManager {
     }
 
     return {
+      id: msg.id?._serialized || generateId(),
       from: msg.from,
       to: msg.to,
       body: msg.body || '',
       timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
       mediaUrl,
       mimetype,
+      fromMe: msg.fromMe || false,
     };
   }
 
   async handleIncomingMessage(msg) {
     try {
-      const isTargetConversation =
-        msg.from === this.config.targetContact || msg.to === this.config.targetContact;
-
+      const isTargetConversation = msg.from === this.config.targetContact || msg.to === this.config.targetContact;
       if (!isTargetConversation) return;
 
       log('info', 'Incoming message', { from: msg.from });
@@ -574,7 +782,6 @@ class WhatsAppManager {
       if (isNew) {
         this.broadcast('message', payload);
 
-        // Send push notification for incoming messages
         if (!msg.fromMe && this.deviceTokens.size > 0) {
           sendPushNotification(
             this.deviceTokens.getAll(),
@@ -596,15 +803,7 @@ class WhatsAppManager {
     try {
       if (msg.to !== this.config.targetContact || !msg.fromMe) return;
 
-      const payload = {
-        from: this.client.info?.wid?._serialized || 'me',
-        to: msg.to,
-        body: msg.body || '',
-        timestamp: msg.timestamp || Math.floor(Date.now() / 1000),
-        mediaUrl: null,
-        mimetype: null,
-      };
-
+      const payload = await this.createMessagePayload(msg);
       if (this.messageCache.add(payload)) {
         log('info', 'Sent message captured');
         this.broadcast('message', payload);
@@ -614,53 +813,80 @@ class WhatsAppManager {
     }
   }
 
+  async sendMessageDirect(text) {
+    await this.client.sendMessage(this.config.targetContact, text, { sendSeen: false });
+    this.lastActivity = Date.now();
+  }
+
+  async sendMediaDirect(base64Data, mimetype, filename) {
+    const base64Body = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+    const media = new MessageMedia(mimetype, base64Body, filename);
+    await this.client.sendMessage(this.config.targetContact, media, { sendSeen: false });
+    this.lastActivity = Date.now();
+  }
+
+  // Queue-based message sending with delivery confirmation
   async sendMessage(text) {
     if (!this.isReady) {
-      throw new Error('Client not ready');
+      // Queue the message for later
+      const queueId = this.messageQueue.add({ type: 'text', content: text });
+      return { queued: true, queueId };
     }
 
-    await this.client.sendMessage(this.config.targetContact, text, { sendSeen: false });
+    try {
+      await this.sendMessageDirect(text);
 
-    const payload = {
-      from: this.client.info?.wid?._serialized || 'me',
-      to: this.config.targetContact,
-      body: text,
-      timestamp: Math.floor(Date.now() / 1000),
-      mediaUrl: null,
-      mimetype: null,
-    };
+      const payload = {
+        id: generateId(),
+        from: this.client.info?.wid?._serialized || 'me',
+        to: this.config.targetContact,
+        body: text,
+        timestamp: Math.floor(Date.now() / 1000),
+        mediaUrl: null,
+        mimetype: null,
+        fromMe: true,
+        status: 'sent',
+      };
 
-    if (this.messageCache.add(payload)) {
+      this.messageCache.add(payload);
       this.broadcast('message', payload);
+      return { success: true, message: payload };
+    } catch (err) {
+      // Queue on failure
+      const queueId = this.messageQueue.add({ type: 'text', content: text });
+      log('error', 'Send failed, queued', { error: err.message, queueId });
+      return { queued: true, queueId, error: err.message };
     }
-
-    return payload;
   }
 
   async sendMedia(base64Data, mimetype, filename) {
     if (!this.isReady) {
-      throw new Error('Client not ready');
+      const queueId = this.messageQueue.add({ type: 'media', base64: base64Data, mimetype, filename });
+      return { queued: true, queueId };
     }
 
-    const base64Body = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
-    const media = new MessageMedia(mimetype, base64Body, filename);
+    try {
+      await this.sendMediaDirect(base64Data, mimetype, filename);
 
-    await this.client.sendMessage(this.config.targetContact, media, { sendSeen: false });
+      const payload = {
+        id: generateId(),
+        from: this.client.info?.wid?._serialized || 'me',
+        to: this.config.targetContact,
+        body: `[Media: ${filename}]`,
+        timestamp: Math.floor(Date.now() / 1000),
+        mediaUrl: null,
+        mimetype,
+        fromMe: true,
+        status: 'sent',
+      };
 
-    const payload = {
-      from: this.client.info?.wid?._serialized || 'me',
-      to: this.config.targetContact,
-      body: `[Media: ${filename}]`,
-      timestamp: Math.floor(Date.now() / 1000),
-      mediaUrl: null,
-      mimetype,
-    };
-
-    if (this.messageCache.add(payload)) {
+      this.messageCache.add(payload);
       this.broadcast('message', payload);
+      return { success: true, message: payload };
+    } catch (err) {
+      const queueId = this.messageQueue.add({ type: 'media', base64: base64Data, mimetype, filename });
+      return { queued: true, queueId, error: err.message };
     }
-
-    return payload;
   }
 
   attemptReconnect() {
@@ -671,20 +897,31 @@ class WhatsAppManager {
     }
 
     this.reconnectAttempts++;
-    const delay = this.config.reconnectDelayMs * this.reconnectAttempts;
+    const delay = this.config.reconnectDelayMs * Math.min(this.reconnectAttempts, 5);
 
     log('info', `Reconnect attempt ${this.reconnectAttempts}/${this.config.maxReconnectAttempts} in ${delay}ms`);
+    this.broadcast('reconnecting', { attempt: this.reconnectAttempts, maxAttempts: this.config.maxReconnectAttempts });
 
-    setTimeout(() => {
-      if (!this.isInitializing && !this.isReady) {
-        this.initialize();
+    setTimeout(async () => {
+      if (!this.isInitializing && !this.isReady && !this.isDestroying) {
+        try {
+          // Destroy and recreate client
+          if (this.client) {
+            try { await this.client.destroy(); } catch (e) {}
+            this.client = null;
+          }
+          await this.initialize();
+        } catch (err) {
+          log('error', 'Reconnect failed', { error: err.message });
+          this.attemptReconnect();
+        }
       }
     }, delay);
   }
 
   async initialize() {
-    if (this.isInitializing) {
-      log('warn', 'Client already initializing');
+    if (this.isInitializing || this.isDestroying) {
+      log('warn', 'Client already initializing or destroying');
       return;
     }
 
@@ -705,9 +942,13 @@ class WhatsAppManager {
   }
 
   async destroy() {
+    this.isDestroying = true;
+    this.stopHealthCheck();
+    this.stopQueueProcessor();
+    clearTimeout(this.loadingTimeout);
+    clearTimeout(this.readyTimeout);
+
     try {
-      clearTimeout(this.loadingTimeout);
-      clearTimeout(this.readyTimeout);
       if (this.client) {
         await this.client.destroy();
       }
@@ -723,6 +964,8 @@ class WhatsAppManager {
       hasQR: !!this.latestQR,
       info: this.client?.info || null,
       reconnectAttempts: this.reconnectAttempts,
+      lastActivity: this.lastActivity,
+      queueSize: this.messageQueue.pendingCount,
     };
   }
 }
@@ -731,128 +974,97 @@ class WhatsAppManager {
 // Express & Socket.IO Setup
 // ============================================================================
 
-// Initialize components
 ensureDirectoryExists(CONFIG.mediaDir);
 const deviceTokens = new DeviceTokenManager(CONFIG.tokensFile);
 const messageCache = new MessageCache(CONFIG.maxCacheSize);
+const messageQueue = new MessageQueue(CONFIG.queueFile, CONFIG.maxQueueSize);
 
-// Express app
 const app = express();
 const server = http.createServer(app);
 
-// Socket.IO
 const io = new SocketIOServer(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
+  cors: { origin: '*', methods: ['GET', 'POST'] },
   pingInterval: 10000,
   pingTimeout: 5000,
   transports: ['websocket', 'polling'],
 });
 
-// Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use('/media', express.static(CONFIG.mediaDir));
 
-// Connected clients tracking
-const connectedClients = new Set();
+const connectedClients = new Map(); // Track client info
 
-// Broadcast function
 function broadcast(event, data) {
-  log('debug', `Broadcasting ${event} to ${connectedClients.size} clients`);
   io.emit(event, data);
 }
 
-// Initialize WhatsApp Manager
-const whatsapp = new WhatsAppManager(CONFIG, messageCache, deviceTokens, broadcast);
+const whatsapp = new WhatsAppManager(CONFIG, messageCache, messageQueue, deviceTokens, broadcast);
 
 // ============================================================================
 // HTTP Routes
 // ============================================================================
 
-// Health check
 app.get('/health', (req, res) => {
   const status = whatsapp.getStatus();
-  let statusCode = 'disconnected';
-
-  if (status.ready) {
-    statusCode = 'connected';
-  } else if (status.hasQR) {
-    statusCode = 'qr_required';
-  } else if (status.initializing) {
-    statusCode = 'initializing';
-  }
-
   res.json({
-    status: statusCode,
+    status: status.ready ? 'connected' : (status.hasQR ? 'qr_required' : (status.initializing ? 'initializing' : 'disconnected')),
     clients: connectedClients.size,
     cache: messageCache.size,
+    queue: messageQueue.pendingCount,
+    lastActivity: status.lastActivity,
   });
 });
 
-// Sync messages
 app.get('/sync-messages', (req, res) => {
-  if (!whatsapp.isReady) {
-    return res.status(503).json({ error: 'WhatsApp client not ready', success: false });
-  }
+  const since = parseInt(req.query.since) || 0;
+  const messages = since ? messageCache.getSince(since) : messageCache.getReversed();
 
-  const messages = messageCache.getReversed();
-  log('info', `Syncing ${messages.length} messages`);
-
-  // Broadcast messages to all clients
+  log('info', `Syncing ${messages.length} messages (since: ${since})`);
   messages.forEach((msg) => broadcast('message', msg));
 
-  res.json({
-    message: 'Messages synced',
-    count: messages.length,
-    success: true,
-  });
+  res.json({ message: 'Messages synced', count: messages.length, success: true });
 });
 
-// Cache info
 app.get('/cache-info', (req, res) => {
-  res.json({
-    ...messageCache.getInfo(),
-    connectedClients: connectedClients.size,
-  });
+  res.json({ ...messageCache.getInfo(), connectedClients: connectedClients.size });
 });
 
-// Debug info
 app.get('/debug-info', (req, res) => {
   res.json({
     ...whatsapp.getStatus(),
     cacheSize: messageCache.size,
     connectedClients: connectedClients.size,
     deviceTokens: deviceTokens.size,
+    queueInfo: {
+      size: messageQueue.size,
+      pending: messageQueue.pendingCount,
+    },
   });
 });
 
-// Test send
-app.post('/test-send', async (req, res) => {
-  if (!whatsapp.isReady) {
-    return res.status(503).json({ error: 'Client not ready' });
-  }
-
-  try {
-    const result = await whatsapp.sendMessage('Test message from backend');
-    res.json({ success: true, result });
-  } catch (err) {
-    log('error', 'Test send failed', { error: err.message });
-    res.status(500).json({ error: err.message });
-  }
+app.get('/queue-status', (req, res) => {
+  res.json({
+    size: messageQueue.size,
+    pending: messageQueue.pendingCount,
+    items: messageQueue.queue.map(q => ({
+      id: q.id,
+      status: q.status,
+      retries: q.retries,
+      createdAt: q.createdAt,
+    })),
+  });
 });
 
-// Register device for push notifications
+app.post('/test-send', async (req, res) => {
+  const result = await whatsapp.sendMessage('Test message from backend');
+  res.json(result);
+});
+
 app.post('/register-device', (req, res) => {
   const { token } = req.body;
-
-  if (!token || typeof token !== 'string') {
-    return res.status(400).json({ error: 'Token required' });
-  }
-
+  if (!token || typeof token !== 'string') return res.status(400).json({ error: 'Token required' });
   deviceTokens.add(token);
   res.json({ success: true });
 });
@@ -862,18 +1074,15 @@ app.post('/register-device', (req, res) => {
 // ============================================================================
 
 io.on('connection', (socket) => {
-  connectedClients.add(socket.id);
+  connectedClients.set(socket.id, { connectedAt: Date.now(), lastSync: 0 });
   log('info', `Client connected [${socket.id}] - Total: ${connectedClients.size}`);
 
-  // Send current state to new client
+  // Send current state
   if (whatsapp.isReady) {
     socket.emit('ready', { status: 'connected' });
-
-    // Send cached messages
     const messages = messageCache.getReversed();
     if (messages.length > 0) {
-      log('info', `Sending ${messages.length} cached messages to new client`);
-      messages.forEach((msg) => socket.emit('message', msg));
+      socket.emit('sync_messages', messages);
     }
   } else if (whatsapp.latestQR) {
     socket.emit('qr', whatsapp.latestQR);
@@ -881,53 +1090,60 @@ io.on('connection', (socket) => {
     socket.emit('disconnected', { reason: 'not_ready' });
   }
 
-  // Handle disconnect
   socket.on('disconnect', () => {
     connectedClients.delete(socket.id);
     log('info', `Client disconnected [${socket.id}] - Total: ${connectedClients.size}`);
   });
 
-  // Handle status request
   socket.on('request_status', () => {
-    if (whatsapp.isReady) {
+    const status = whatsapp.getStatus();
+    if (status.ready) {
       socket.emit('ready', { status: 'connected' });
-    } else if (whatsapp.latestQR) {
+    } else if (status.hasQR) {
       socket.emit('qr', whatsapp.latestQR);
     } else {
-      socket.emit('disconnected', { reason: 'not_ready' });
+      socket.emit('disconnected', { reason: 'not_ready', status });
     }
   });
 
-  // Handle send message
-  socket.on('send_message', async ({ message }) => {
-    if (!whatsapp.isReady) {
-      return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
-    }
+  socket.on('sync_request', (data) => {
+    const since = data?.since || 0;
+    const messages = since ? messageCache.getSince(since) : messageCache.getReversed();
+    socket.emit('sync_messages', messages);
 
-    try {
-      log('info', `Sending message to ${CONFIG.targetContact}`);
-      await whatsapp.sendMessage(message);
-      socket.emit('send_result', { ok: true });
-    } catch (err) {
-      log('error', 'Send message failed', { error: err.message });
-      socket.emit('send_result', { ok: false, error: err.message });
+    const clientInfo = connectedClients.get(socket.id);
+    if (clientInfo) clientInfo.lastSync = Date.now();
+  });
+
+  socket.on('send_message', async ({ message, tempId }) => {
+    const result = await whatsapp.sendMessage(message);
+
+    if (result.success) {
+      socket.emit('send_result', { ok: true, tempId, message: result.message });
+    } else if (result.queued) {
+      socket.emit('send_result', { ok: true, queued: true, tempId, queueId: result.queueId });
+    } else {
+      socket.emit('send_result', { ok: false, tempId, error: result.error });
     }
   });
 
-  // Handle send media
-  socket.on('send_media', async ({ base64, mimetype, filename }) => {
-    if (!whatsapp.isReady) {
-      return socket.emit('send_result', { ok: false, error: 'client_not_ready' });
-    }
+  socket.on('send_media', async ({ base64, mimetype, filename, tempId }) => {
+    const result = await whatsapp.sendMedia(base64, mimetype, filename);
 
-    try {
-      log('info', `Sending media: ${filename}`);
-      await whatsapp.sendMedia(base64, mimetype, filename);
-      socket.emit('send_result', { ok: true });
-    } catch (err) {
-      log('error', 'Send media failed', { error: err.message });
-      socket.emit('send_result', { ok: false, error: err.message });
+    if (result.success) {
+      socket.emit('send_result', { ok: true, tempId, message: result.message });
+    } else if (result.queued) {
+      socket.emit('send_result', { ok: true, queued: true, tempId, queueId: result.queueId });
+    } else {
+      socket.emit('send_result', { ok: false, tempId, error: result.error });
     }
+  });
+
+  socket.on('get_queue_status', () => {
+    socket.emit('queue_status', {
+      pending: messageQueue.pendingCount,
+      processing: messageQueue.processing,
+    });
   });
 });
 
@@ -950,20 +1166,15 @@ function cleanupOldMedia() {
           fs.unlinkSync(filePath);
           deletedCount++;
         }
-      } catch (err) {
-        // Ignore individual file errors
-      }
+      } catch (err) {}
     });
 
-    if (deletedCount > 0) {
-      log('info', `Cleaned up ${deletedCount} old media files`);
-    }
+    if (deletedCount > 0) log('info', `Cleaned up ${deletedCount} old media files`);
   } catch (err) {
     log('warn', 'Media cleanup failed', { error: err.message });
   }
 }
 
-// Run cleanup every 12 hours
 setInterval(cleanupOldMedia, 12 * 60 * 60 * 1000);
 
 // ============================================================================
@@ -971,43 +1182,33 @@ setInterval(cleanupOldMedia, 12 * 60 * 60 * 1000);
 // ============================================================================
 
 async function startup() {
-  // Initialize push service
   pushService = await initializePushService();
 
-  // Start HTTP server
   server.listen(CONFIG.port, () => {
     log('success', `🚀 Server running on port ${CONFIG.port}`);
     log('info', `Target contact: ${CONFIG.targetContact}`);
-    log('info', `Media directory: ${CONFIG.mediaDir}`);
+    log('info', `Pending queue items: ${messageQueue.pendingCount}`);
   });
 
-  // Initialize WhatsApp client
   whatsapp.initialize();
 }
 
 async function shutdown(signal) {
   log('info', `Received ${signal}. Shutting down gracefully...`);
-
-  // Notify clients
   broadcast('server_shutdown', { reason: signal });
-
-  // Destroy WhatsApp client
   await whatsapp.destroy();
 
-  // Close server
   server.close(() => {
     log('info', 'Server closed');
     process.exit(0);
   });
 
-  // Force exit after 5 seconds
   setTimeout(() => {
     log('warn', 'Forced shutdown');
     process.exit(1);
   }, 5000);
 }
 
-// Handle shutdown signals
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('uncaughtException', (err) => {
@@ -1017,5 +1218,4 @@ process.on('unhandledRejection', (reason) => {
   log('error', 'Unhandled rejection', { reason: String(reason) });
 });
 
-// Start the application
 startup();

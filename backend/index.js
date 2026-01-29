@@ -627,10 +627,14 @@ class WhatsAppManager {
   async refreshConnection() {
     try {
       log('info', 'Refreshing connection...');
-      // Try to get chats to refresh connection
-      await this.client.getChats();
-      this.lastActivity = Date.now();
-      log('success', 'Connection refreshed');
+      // Try to get state to verify connection is alive
+      const state = await this.client.getState();
+      if (state === 'CONNECTED') {
+        this.lastActivity = Date.now();
+        log('success', 'Connection refreshed', { state });
+      } else {
+        throw new Error(`Unexpected state: ${state}`);
+      }
     } catch (err) {
       log('error', 'Failed to refresh connection', { error: err.message });
       throw err;
@@ -698,10 +702,24 @@ class WhatsAppManager {
         return;
       }
 
-      const chats = await this.client.getChats();
-      log('info', `Found ${chats.length} chats`);
+      let targetChat = null;
 
-      const targetChat = chats.find(chat => chat.id._serialized === this.config.targetContact);
+      // Try getChatById first (more reliable in newer versions)
+      try {
+        targetChat = await this.client.getChatById(this.config.targetContact);
+        log('info', 'Target chat found via getChatById');
+      } catch (chatErr) {
+        log('warn', 'getChatById failed, trying getChats fallback', { error: chatErr.message });
+
+        // Fallback to getChats
+        try {
+          const chats = await this.client.getChats();
+          log('info', `Found ${chats.length} chats`);
+          targetChat = chats.find(chat => chat.id._serialized === this.config.targetContact);
+        } catch (chatsErr) {
+          log('error', 'getChats also failed', { error: chatsErr.message });
+        }
+      }
 
       if (!targetChat) {
         log('info', 'Target chat not found - will populate as messages arrive');
@@ -709,7 +727,7 @@ class WhatsAppManager {
         return;
       }
 
-      log('info', 'Target chat found, loading messages...');
+      log('info', 'Loading messages from target chat...');
       const messages = await targetChat.fetchMessages({ limit: 50 });
       log('info', `Loaded ${messages.length} messages from history`);
 

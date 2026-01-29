@@ -24,10 +24,5 @@
     "qrcode-terminal": "^0.12.0",
     "socket.io": "^4.8.1",
     "whatsapp-web.js": "^1.26.0"
-  },
-  "overrides": {
-    "whatsapp-web.js": {
-      "puppeteer": "npm:puppeteer-core@^23.11.1"
-    }
   }
 }

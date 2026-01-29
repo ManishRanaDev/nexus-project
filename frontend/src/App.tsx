@@ -749,8 +749,8 @@ const RealChatMode: React.FC<{ onLock: () => void }> = ({ onLock }) => {
 
   const handleSync = useCallback(() => {
     if (socketRef.current) {
-      const lastSync = getLastSyncTimestamp();
-      socketRef.current.emit('sync_request', { since: lastSync });
+      // Force reload from WhatsApp when manually syncing
+      socketRef.current.emit('sync_request', { since: 0, forceReload: true });
     }
   }, []);
 

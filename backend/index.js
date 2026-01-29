@@ -1124,8 +1124,16 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('sync_request', (data) => {
+  socket.on('sync_request', async (data) => {
     const since = data?.since || 0;
+    const forceReload = data?.forceReload || false;
+
+    // If force reload requested and WhatsApp is ready, reload messages first
+    if (forceReload && whatsapp.isReady) {
+      log('info', 'Sync with force reload requested');
+      await whatsapp.loadMessageHistory();
+    }
+
     const messages = since ? messageCache.getSince(since) : messageCache.getReversed();
     socket.emit('sync_messages', messages);
 

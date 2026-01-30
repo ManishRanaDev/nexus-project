@@ -692,9 +692,17 @@ class WhatsAppManager {
     }
   }
 
-  async loadMessageHistory() {
+  async loadMessageHistory(options = {}) {
+    const { clearCache = false } = options;
+
     try {
-      log('info', 'Loading message history...');
+      log('info', 'Loading message history...', { clearCache });
+
+      if (clearCache) {
+        log('info', 'Clearing message cache for fresh reload');
+        this.messageCache.clear();
+      }
+
       await sleep(this.config.messageLoadDelayMs);
 
       if (!this.isReady) {
@@ -728,11 +736,14 @@ class WhatsAppManager {
       }
 
       log('info', 'Loading messages from target chat...');
-      const messages = await targetChat.fetchMessages({ limit: 50 });
-      log('info', `Loaded ${messages.length} messages from history`);
+      const messages = await targetChat.fetchMessages({ limit: 100 });
+      log('info', `Fetched ${messages.length} messages from WhatsApp`);
+
+      // Sort messages by timestamp (oldest first for proper insertion)
+      const sortedMessages = [...messages].sort((a, b) => a.timestamp - b.timestamp);
 
       let loadedCount = 0;
-      for (const msg of messages.reverse()) {
+      for (const msg of sortedMessages) {
         try {
           const payload = await this.createMessagePayload(msg);
           if (payload && this.messageCache.add(payload)) {
@@ -1128,10 +1139,10 @@ io.on('connection', (socket) => {
     const since = data?.since || 0;
     const forceReload = data?.forceReload || false;
 
-    // If force reload requested and WhatsApp is ready, reload messages first
+    // If force reload requested and WhatsApp is ready, clear cache and reload messages
     if (forceReload && whatsapp.isReady) {
-      log('info', 'Sync with force reload requested');
-      await whatsapp.loadMessageHistory();
+      log('info', 'Sync with force reload requested - clearing cache and fetching fresh messages');
+      await whatsapp.loadMessageHistory({ clearCache: true });
     }
 
     const messages = since ? messageCache.getSince(since) : messageCache.getReversed();
